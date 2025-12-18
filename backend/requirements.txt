@@ -1,0 +1,50 @@
+# ---- Core Framework ----
+fastapi==0.115.2
+uvicorn==0.38.0
+gunicorn==20.1.0               # optional production WSGI server
+
+# ---- Database ----
+motor==3.5.1                   # Async MongoDB client
+pymongo==4.8.0
+
+# ---- Caching / Redis ----
+redis==5.0.7
+aioredis==2.0.1                # Async Redis support
+
+# ---- Authentication / Security ----
+python-jose==3.3.0             # JWT tokens
+passlib[bcrypt]==1.7.4         # password hashing
+cryptography==43.0.0
+
+# ---- Environment / Validation ----
+pydantic==2.9.2
+pydantic-settings==2.3.4
+email-validator==2.0.0         # email validation used by pydantic
+
+# ---- ML / Data Science ----
+numpy==1.26.4
+pandas==2.2.2
+scipy==1.11.3
+scikit-learn==1.5.2            # Isolation Forest, other models
+joblib==1.3.2                  # model serialization/IO
+
+# ---- Deep Learning (LSTM) ----
+tensorflow==2.17.0
+
+# ---- File uploads / async file serving ----
+python-multipart==0.0.9        # file uploads
+aiofiles==23.2.1               # async file operations (static/uploads)
+
+# ---- HTTP / Async requests ----
+requests==2.32.3
+httpx==0.24.1                  # async HTTP client
+aiohttp==3.8.4
+
+# ---- Fast JSON / Performance ----
+orjson==3.11.0                 # optional faster JSON for FastAPI
+
+# ---- Utilities / Env ---
+python-dotenv==1.0.1
+prometheus-client==0.17.0      # metrics (optional)
+
+PyJWT==2.10.1

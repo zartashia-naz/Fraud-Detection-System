@@ -1,0 +1,105 @@
+# Operating systems
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
+*.swp
+*~
+
+# Python
+__pycache__/
+*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+.cache
+.python-version
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+build/
+dist/
+venv/
+ENV/
+env/
+.env/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+# (Keep notebooks tracked; only ignore checkpoints)
+
+# Data, models and artifacts
+data/
+datasets/
+raw_data/
+processed_data/
+models/
+checkpoints/
+runs/               # tensorboard
+mlruns/             # mlflow
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.joblib
+*.parquet
+*.csv
+*.tsv
+
+# Logs and runtime files
+logs/
+*.log
+*.out
+*.pid
+tmp/
+temp/
+*.tmp
+
+# Databases
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# Secrets and configs
+.env
+.env.*
+secrets.yml
+credentials.json
+*.pem
+*.key
+
+# Container / build
+docker-compose.override.yml
+docker-compose.local.yml
+dist/
+node_modules/
+
+# Static analysis / caches
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+.cache/
+
+# Documentation
+_build/
+*.tmp
+
+# Misc
+*.bak
+*.orig
+# Windows trash
+$RECYCLE.BIN/
+
+__pycache__/
+*.pyc
