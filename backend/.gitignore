@@ -19,7 +19,6 @@ __pycache__/
 *$py.class
 .pytest_cache/
 .coverage
-.cache
 .python-version
 pip-wheel-metadata/
 *.egg-info/
@@ -41,19 +40,17 @@ data/
 datasets/
 raw_data/
 processed_data/
-models/
 checkpoints/
 runs/               # tensorboard
 mlruns/             # mlflow
-*.h5
+
 *.hdf5
 *.pt
 *.pth
 *.ckpt
-*.pkl
-*.joblib
+
 *.parquet
-*.csv
+
 *.tsv
 
 # Logs and runtime files
@@ -89,7 +86,7 @@ node_modules/
 .pyre/
 .pytype/
 .ruff_cache/
-.cache/
+
 
 # Documentation
 _build/
