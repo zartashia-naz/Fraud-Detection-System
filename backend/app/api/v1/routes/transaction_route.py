@@ -325,10 +325,9 @@
 
 
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, HTTPException
 from datetime import datetime
 from typing import Optional
-
 from bson import ObjectId
 
 from app.db.mongodb import get_database
@@ -341,19 +340,18 @@ from app.api.v1.routes.anomaly_route import handle_anomaly
 from app.core.dsa.redis_dsa import push_recent_txn
 from app.core.security import get_current_user
 from app.hybrid_model.hybrid_transaction import hybrid_transaction_decision
+from app.services.otp_service import create_or_resend_otp
+from app.services.otp_verify_service import verify_otp
 
 router = APIRouter(prefix="/transactions", tags=["Transactions"])
 
-
 # --------------------------------------------------
-# HELPER: ObjectId → str
+# HELPER
 # --------------------------------------------------
 def serialize_mongo(doc: dict) -> dict:
-    """Convert Mongo ObjectId to string for API response"""
-    if "_id" in doc and isinstance(doc["_id"], ObjectId):
+    if "_id" in doc:
         doc["_id"] = str(doc["_id"])
     return doc
-
 
 # --------------------------------------------------
 # CREATE TRANSACTION
@@ -366,12 +364,12 @@ async def create_transaction(
     current_user=Depends(get_current_user),
 ):
     user_id = current_user["id"]
+    email = current_user["email"]
 
     ip_address = get_client_ip(request)
     device_id = get_device_id(request)
     location = get_location_from_ip(ip_address)
 
-    # Last transaction
     last_txn = await db.transactions.find_one(
         {"user_id": user_id}, sort=[("_id", -1)]
     )
@@ -398,78 +396,139 @@ async def create_transaction(
         "previous_transaction_date": prev_date,
     }
 
-    # --------------------------------------------------
-    # HYBRID DETECTION
-    # --------------------------------------------------
-    hybrid_result = hybrid_transaction_decision(current_txn, last_txn)
-
-    severity = hybrid_result["severity"]
-    is_moderate = hybrid_result["is_moderate"]
-    is_anomaly = hybrid_result["is_anomaly"]
-
-    risk_score = int(round(hybrid_result["hybrid_score"] * 100))
+    hybrid = hybrid_transaction_decision(current_txn, last_txn)
 
     txn = TransactionModel(
         **current_txn,
         merchant_id=merchant_id,
-        rule_flag=hybrid_result["rule_flag"],
-        rule_score=hybrid_result["rule_score"],
-        rule_details=hybrid_result["rule_details"],
-        ml_iso_score=hybrid_result["ml_iso_score"],
-        ml_ae_score=hybrid_result["ml_ae_score"],
-        ml_score=hybrid_result["ml_score"],
-        hybrid_score=hybrid_result["hybrid_score"],
-        is_moderate=is_moderate,
-        is_anomaly=is_anomaly,
-        severity=severity,
-        reasons=hybrid_result["reasons"],
-        reason_summary=hybrid_result["reason_summary"],
-        risk_score=risk_score,
+        rule_flag=hybrid["rule_flag"],
+        rule_score=hybrid["rule_score"],
+        rule_details=hybrid["rule_details"],
+        ml_iso_score=hybrid["ml_iso_score"],
+        ml_ae_score=hybrid["ml_ae_score"],
+        ml_score=hybrid["ml_score"],
+        hybrid_score=hybrid["hybrid_score"],
+        is_moderate=hybrid["is_moderate"],
+        is_anomaly=hybrid["is_anomaly"],
+        severity=hybrid["severity"],
+        reasons=hybrid["reasons"],
+        reason_summary=hybrid["reason_summary"],
+        risk_score=int(round(hybrid["hybrid_score"] * 100)),
     )
 
     txn_dict = txn.model_dump()
 
-    # --------------------------------------------------
-    # 🚦 STORAGE DECISION
-    # --------------------------------------------------
-
     # ✅ NORMAL
-    if severity == "normal":
+    if hybrid["severity"] == "normal":
+        txn_dict["status"] = "completed"
         result = await db.transactions.insert_one(txn_dict)
         txn_dict["_id"] = result.inserted_id
         push_recent_txn(user_id, txn_dict)
 
         return {
-            "message": "Transaction added",
+            "message": "Transaction successful",
             "data": serialize_mongo(txn_dict),
         }
 
-    # 🟡 MODERATE (OTP REQUIRED)
-    if is_moderate == 1:
-        txn_dict["status"] = "pending_otp"
+    # 🟡 MODERATE → PENDING OTP
+    if hybrid["is_moderate"] == 1:
+        txn_dict["status"] = "pending"
         result = await db.flagged_transactions.insert_one(txn_dict)
         txn_dict["_id"] = result.inserted_id
 
+        await create_or_resend_otp(
+            db=db,
+            user_id=user_id,
+            email=email,
+            purpose="transaction_approval",
+        )
+
         return {
-            "message": "Transaction flagged. OTP verification required.",
+            "message": "Transaction pending verification",
             "data": serialize_mongo(txn_dict),
         }
 
     # 🔴 HIGH RISK
-    if is_anomaly == 1:
-        result = await db.anomalies.insert_one(txn_dict)
-        txn_dict["_id"] = result.inserted_id
+    txn_dict["status"] = "blocked"
+    result = await db.anomalies.insert_one(txn_dict)
+    txn_dict["_id"] = result.inserted_id
 
-        await handle_anomaly(
-            {
-                "is_anomaly": True,
-                "event_type": "transaction",
-                "event_data": txn_dict,
-            },
-            db,
-        )
+    await handle_anomaly(
+        {
+            "is_anomaly": True,
+            "event_type": "transaction",
+            "event_data": txn_dict,
+        },
+        db,
+    )
 
-        return {
-            "message": "Transaction blocked due to high risk",
-            "data": serialize_mongo(txn_dict),
-        }
+    return {
+        "message": "Transaction blocked due to high risk",
+        "data": serialize_mongo(txn_dict),
+    }
+
+# --------------------------------------------------
+# VERIFY TRANSACTION OTP
+# --------------------------------------------------
+@router.post("/verify-otp")
+async def verify_transaction_otp(
+    otp: str,
+    transaction_id: str,
+    db=Depends(get_database),
+    current_user=Depends(get_current_user),
+):
+    user_id = current_user["id"]
+
+    await verify_otp(
+        db=db,
+        user_id=user_id,
+        purpose="transaction_approval",
+        otp=otp,
+    )
+
+    flagged = await db.flagged_transactions.find_one({
+        "_id": ObjectId(transaction_id),
+        "user_id": user_id,
+        "status": "pending",
+    })
+
+    if not flagged:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+
+    flagged.pop("_id")
+    flagged["status"] = "resolved"
+    flagged["approved_at"] = datetime.utcnow()
+
+    result = await db.transactions.insert_one(flagged)
+    await db.flagged_transactions.delete_one({"_id": ObjectId(transaction_id)})
+
+    flagged["_id"] = result.inserted_id
+    push_recent_txn(user_id, flagged)
+
+    return {
+        "message": "Transaction resolved successfully",
+        "data": serialize_mongo(flagged),
+    }
+
+# --------------------------------------------------
+# GET TRANSACTIONS (COMBINED)
+# --------------------------------------------------
+@router.get("")
+async def get_transactions(
+    db=Depends(get_database),
+    current_user=Depends(get_current_user),
+):
+    user_id = current_user["id"]
+
+    completed = await db.transactions.find({"user_id": user_id}).to_list(1000)
+    pending = await db.flagged_transactions.find({"user_id": user_id}).to_list(1000)
+
+    all_txns = completed + pending
+
+    for txn in all_txns:
+        serialize_mongo(txn)
+
+    return {
+        "transactions": all_txns,
+        "count": len(all_txns),
+    }
