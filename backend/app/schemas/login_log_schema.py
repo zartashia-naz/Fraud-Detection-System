@@ -1,27 +1,3 @@
-# from pydantic import BaseModel
-# from datetime import datetime
-# from typing import Optional, Dict
-
-# class LoginLogCreate(BaseModel):
-#     device_id: Optional[str] = None
-#     login_status: str = "success"
-
-
-# class LoginLogResponse(BaseModel):
-#     id: str
-#     user_id: str
-#     email: Optional[str] = None
-#     device_id: str
-#     ip_address: str
-#     location: Dict
-#     login_time: datetime
-#     previous_login_time: Optional[datetime] = None
-#     login_attempts: int
-#     is_anomaly: bool = False
-
-# ==================CLAUDE CODE BELOW===============
-
-
 # backend/app/schemas/login_log_schema.py
 
 from pydantic import BaseModel, Field
@@ -78,7 +54,8 @@ class LoginLogResponse(BaseModel):
     hybrid_score: Optional[float] = Field(None, description="Combined hybrid anomaly score (0.0–1.0)")
     is_moderate: Optional[int] = Field(None, description="Moderate suspicion flag (0/1)")
     is_anomaly: bool = Field(False, description="Final anomaly decision flag from hybrid detector")
-
+    anomaly_reason: Optional[str] = Field(None, description="Human-readable reason for anomaly detection")
+    
     # Optional risk abstractions (kept for compatibility / UI)
     risk_score: int = Field(0, description="Calculated risk score (0-100), e.g. scaled from hybrid_score")
     rule_based_score: Optional[int] = Field(None, description="Legacy rule-based detection score (0-100)")

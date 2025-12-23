@@ -82,3 +82,78 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
         )
 
     return decoded
+
+
+
+# =====================================================================
+# 🔐 ADDITIONS FOR LOGIN 2FA (TEMP TOKEN) — NO EXISTING CODE TOUCHED
+# =====================================================================
+
+TEMP_TOKEN_EXPIRE_MINUTES = 10
+
+oauth2_temp_scheme = OAuth2PasswordBearer(
+    tokenUrl="/api/v1/auth/login",
+    auto_error=False
+)
+
+
+def create_temp_token(data: dict):
+    """
+    Used ONLY for login 2FA flow.
+    This token does NOT mean the user is fully authenticated.
+    """
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=TEMP_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({
+        "exp": expire,
+        "type": "temp_login"
+    })
+
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_temp_token(token: str):
+    try:
+        decoded = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+
+        if decoded.get("type") != "temp_login":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid temporary token"
+            )
+
+        return decoded
+
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Temporary token expired"
+        )
+
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid temporary token"
+        )
+
+
+def get_current_temp_user(token: str = Depends(oauth2_temp_scheme)):
+    """
+    Used ONLY for login OTP verification.
+    Does NOT replace get_current_user.
+    """
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Temporary token missing"
+        )
+
+    decoded = decode_temp_token(token)
+
+    if "id" not in decoded:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid temporary token payload"
+        )
+
+    return decoded

@@ -1,3 +1,4 @@
+# claude:
 """
 Hybrid Login Anomaly Detection
 --------------------------------
@@ -50,13 +51,11 @@ scaler = joblib.load(SCALER_PATH)
 # HYBRID PARAMETERS
 # --------------------------------------------------
 
-
 RULE_WEIGHT = 0.4
 ML_WEIGHT   = 0.6
 
 MODERATE_THRESHOLD = 0.35   # ⚠️ monitor / step-up auth
 ANOMALY_THRESHOLD  = 0.70   # 🚨 block / alert
-
 
 
 # --------------------------------------------------
@@ -73,14 +72,27 @@ def hybrid_login_decision(login_event_df: pd.DataFrame) -> dict:
     Returns
     -------
     dict
-        Hybrid login anomaly result
+        Hybrid login anomaly result with concise reason
     """
+
+    if login_event_df.empty:
+        return {
+            "event_type": "login",
+            "rule_flag": 0,
+            "rule_score": 0.0,
+            "ml_score": 0.0,
+            "hybrid_score": 0.0,
+            "is_moderate": 0,
+            "is_anomaly": 0,
+            "anomaly_reason": None
+        }
+    
+    row = login_event_df.iloc[0]
 
     # -------------------------------
     # 1. RULE-BASED DETECTION
     # -------------------------------
     rule_flag = login_rule_engine(login_event_df)
-
     rule_score = 1.0 if rule_flag == 1 else 0.0
 
     # -------------------------------
@@ -152,7 +164,15 @@ def hybrid_login_decision(login_event_df: pd.DataFrame) -> dict:
         is_moderate = 0
     
     # -------------------------------
-    # 4. OUTPUT
+    # 4. BUILD CONCISE REASON (only if anomaly/moderate)
+    # -------------------------------
+    anomaly_reason = None
+    
+    if is_anomaly or is_moderate:
+        anomaly_reason = _build_anomaly_reason(row)
+    
+    # -------------------------------
+    # 5. OUTPUT
     # -------------------------------
     return {
         "event_type": "login",
@@ -161,213 +181,72 @@ def hybrid_login_decision(login_event_df: pd.DataFrame) -> dict:
         "ml_score": round(ml_score, 4),
         "hybrid_score": round(hybrid_score, 4),
         "is_moderate": is_moderate,
-        "is_anomaly": is_anomaly
+        "is_anomaly": is_anomaly,
+        "anomaly_reason": anomaly_reason  # ✅ Concise reason with actual values
     }
 
 
-# # --------------------------------------------------
-# # OPTIONAL: QUICK TEST BLOCK
-# # --------------------------------------------------
-
-# if __name__ == "__main__":
-#     print("=" * 80)
-#     print("HYBRID LOGIN ANOMALY DETECTION - TEST CASES")
-#     print("=" * 80)
-#     print()
+def _build_anomaly_reason(row: pd.Series) -> str:
+    """
+    Build a concise, human-readable anomaly reason with actual values.
+    Similar to real-world security systems (Google, AWS, etc.)
     
-#     # Test Case 1: NORMAL LOGIN (should not be flagged as anomaly)
-#     print("-" * 80)
-#     print("CASE 1: NORMAL LOGIN")
-#     print("-" * 80)
-#     normal_login = pd.DataFrame([{
-#         "login_hour": 14,  # 2 PM - normal time
-#         "login_dayofweek": 2,  # Wednesday
-#         "is_weekend": 0,
-#         "time_since_last_login": 3600.0,  # 1 hour ago - normal
-#         "device_changed": 0,  # Same device
-#         "ip_changed": 0,  # Same IP
-#         "location_changed": 0,  # Same location
-#         "LoginAttempts": 1,  # Single successful attempt
-#         "failed_login": 0,
-#         "high_login_attempts": 0
-#     }])
-#     result1 = hybrid_login_decision(normal_login)
-#     print(f"Result: {result1}")
-#     print(f"Detailed Analysis:")
-#     print(f"  - Rule-based flag: {result1['rule_flag']} ({'Anomaly' if result1['rule_flag'] == 1 else 'Normal'})")
-#     print(f"  - Rule-based score: {result1['rule_score']}")
-#     print(f"  - ML-based score: {result1['ml_score']}")
-#     print(f"  - Hybrid score: {result1['hybrid_score']} (threshold: {ANOMALY_THRESHOLD})")
-#     print(f"  - Final Decision: {'ANOMALY DETECTED' if result1['is_anomaly'] == 1 else 'NORMAL LOGIN'}")
-#     print()
+    Parameters
+    ----------
+    row : pd.Series
+        Single row from login event dataframe
+        
+    Returns
+    -------
+    str
+        Concise reason like: "Login from Moscow, Russia (95.142.200.15) using new device iPhone 15 Pro"
+    """
+    reasons = []
     
-#     # Test Case 2: SUSPICIOUS LOGIN (should be flagged as anomaly)
-#     print("-" * 80)
-#     print("CASE 2: SUSPICIOUS LOGIN (Multiple Red Flags)")
-#     print("-" * 80)
-#     suspicious_login = pd.DataFrame([{
-#         "login_hour": 3,  # 3 AM - unusual time
-#         "login_dayofweek": 6,  # Saturday
-#         "is_weekend": 1,
-#         "time_since_last_login": 100.0,  # Very recent (suspicious)
-#         "device_changed": 1,  # New device
-#         "ip_changed": 1,  # New IP
-#         "location_changed": 1,  # New location
-#         "LoginAttempts": 8,  # High number of attempts
-#         "failed_login": 1,  # Failed login
-#         "high_login_attempts": 1  # High attempts flag
-#     }])
-#     result2 = hybrid_login_decision(suspicious_login)
-#     print(f"Result: {result2}")
-#     print(f"Detailed Analysis:")
-#     print(f"  - Rule-based flag: {result2['rule_flag']} ({'Anomaly' if result2['rule_flag'] == 1 else 'Normal'})")
-#     print(f"  - Rule-based score: {result2['rule_score']}")
-#     print(f"  - ML-based score: {result2['ml_score']}")
-#     print(f"  - Hybrid score: {result2['hybrid_score']} (threshold: {ANOMALY_THRESHOLD})")
-#     print(f"  - Final Decision: {'ANOMALY DETECTED' if result2['is_anomaly'] == 1 else 'NORMAL LOGIN'}")
-#     print()
+    # Priority 1: Location change (highest priority - most critical for security)
+    if row.get('location_changed', 0) == 1:
+        location = row.get('location', {})
+        city = location.get('city', 'Unknown')
+        country = location.get('country', 'Unknown')
+        ip = row.get('ip_address', 'Unknown IP')
+        reasons.append(f"Login from {city}, {country} ({ip})")
     
-#     # Test Case 3: ANOMALY CASE (should be flagged - extreme values)
-#     print("-" * 80)
-#     print("CASE 3: ANOMALY DETECTED (Extreme Suspicion)")
-#     print("-" * 80)
-#     anomaly_login = pd.DataFrame([{
-#         "login_hour": 1,  # 1 AM - very unusual time
-#         "login_dayofweek": 6,  # Saturday
-#         "is_weekend": 1,
-#         "time_since_last_login": 10.0,  # Very recent (10 seconds) - highly suspicious
-#         "device_changed": 1,  # New device
-#         "ip_changed": 1,  # New IP
-#         "location_changed": 1,  # New location
-#         "LoginAttempts": 15,  # Very high attempts
-#         "failed_login": 1,  # Failed login
-#         "high_login_attempts": 1  # High attempts flag
-#     }])
-#     result3 = hybrid_login_decision(anomaly_login)
-#     print(f"Result: {result3}")
-#     print(f"Detailed Analysis:")
-#     print(f"  - Rule-based flag: {result3['rule_flag']} ({'Anomaly' if result3['rule_flag'] == 1 else 'Normal'})")
-#     print(f"  - Rule-based score: {result3['rule_score']}")
-#     print(f"  - ML-based score: {result3['ml_score']}")
-#     print(f"  - Hybrid score: {result3['hybrid_score']} (threshold: {ANOMALY_THRESHOLD})")
-#     print(f"  - Final Decision: {'ANOMALY DETECTED' if result3['is_anomaly'] == 1 else 'NORMAL LOGIN'}")
-#     print()
+    # Priority 2: Device change
+    elif row.get('device_changed', 0) == 1:
+        device_name = row.get('device_name', 'Unknown Device')
+        reasons.append(f"Login from new device: {device_name}")
     
-#     # Test Case 4: VERY LOW ANOMALY (minimal suspicious indicators)
-#     print("-" * 80)
-#     print("CASE 4: VERY LOW ANOMALY (Minimal Suspicious Indicators)")
-#     print("-" * 80)
-#     low_anomaly_login = pd.DataFrame([{
-#         "login_hour": 1,  # 1 AM - unusual hour (triggers rule)
-#         "login_dayofweek": 2,  # Wednesday
-#         "is_weekend": 0,
-#         "time_since_last_login": 3600.0,  # 1 hour ago - normal
-#         "device_changed": 0,  # Same device
-#         "ip_changed": 0,  # Same IP
-#         "location_changed": 0,  # Same location
-#         "LoginAttempts": 2,  # Normal attempts (below threshold)
-#         "failed_login": 0,  # No failures
-#         "high_login_attempts": 0  # Normal attempts
-#     }])
-#     result4 = hybrid_login_decision(low_anomaly_login)
-#     print(f"Result: {result4}")
-#     print(f"Detailed Analysis:")
-#     print(f"  - Rule-based flag: {result4['rule_flag']} ({'Anomaly' if result4['rule_flag'] == 1 else 'Normal'})")
-#     print(f"  - Rule-based score: {result4['rule_score']}")
-#     print(f"  - ML-based score: {result4['ml_score']}")
-#     print(f"  - Hybrid score: {result4['hybrid_score']} (threshold: {ANOMALY_THRESHOLD})")
-#     print(f"  - Final Decision: {'ANOMALY DETECTED' if result4['is_anomaly'] == 1 else 'NORMAL LOGIN'}")
-#     print()
+    # Priority 3: IP change (without location change - same city, different network)
+    elif row.get('ip_changed', 0) == 1:
+        ip = row.get('ip_address', 'Unknown IP')
+        reasons.append(f"Login from new IP address: {ip}")
     
-#     print("=" * 80)
-#     print("SUMMARY")
-#     print("=" * 80)
-#     print(f"Case 1 (Normal):      {'ANOMALY' if result1['is_anomaly'] == 1 else 'NORMAL'} - Hybrid Score: {result1['hybrid_score']:.4f} | Rule: {result1['rule_score']:.2f} | ML: {result1['ml_score']:.4f}")
-#     print(f"Case 2 (Suspicious):  {'ANOMALY' if result2['is_anomaly'] == 1 else 'NORMAL'} - Hybrid Score: {result2['hybrid_score']:.4f} | Rule: {result2['rule_score']:.2f} | ML: {result2['ml_score']:.4f}")
-#     print(f"Case 3 (Anomaly):     {'ANOMALY' if result3['is_anomaly'] == 1 else 'NORMAL'} - Hybrid Score: {result3['hybrid_score']:.4f} | Rule: {result3['rule_score']:.2f} | ML: {result3['ml_score']:.4f}")
-#     print(f"Case 4 (Very Low):    {'ANOMALY' if result4['is_anomaly'] == 1 else 'NORMAL'} - Hybrid Score: {result4['hybrid_score']:.4f} | Rule: {result4['rule_score']:.2f} | ML: {result4['ml_score']:.4f}")
+    # Priority 4: Multiple failed attempts (high security concern)
+    login_attempts = row.get('LoginAttempts', row.get('login_attempts', 0))
+    if row.get('high_login_attempts', 0) == 1 or login_attempts > 5:
+        reasons.append(f"{login_attempts} failed login attempts detected")
     
-#     # Test Case 5: MODERATE ANOMALY (targeting ~0.4 score)
-#     # Note: Getting exactly 0.4 is challenging because:
-#     # - If rule_flag=0: Need ML score = 0.6667 (very high, ML typically scores 0.3-0.4)
-#     # - If rule_flag=1: Minimum hybrid score = 0.5 (from rule weight alone)
-#     # This case demonstrates the closest achievable score with rule_flag=0
-#     print("-" * 80)
-#     print("CASE 5: MODERATE ANOMALY (Targeting ~0.4 Hybrid Score)")
-#     print("-" * 80)
-#     # Target: hybrid_score = 0.4
-#     # Formula: (0.5 * rule_score) + (0.6 * ml_score) = 0.4
-#     # If rule_score = 0: ml_score = 0.4/0.6 = 0.6667
-#     # If rule_score = 1: ml_score = (0.4 - 0.5)/0.6 = negative (impossible)
-#     # So we need rule_flag = 0 and ml_score ≈ 0.67
-#     # To get higher ML score, we need more unusual patterns but not enough to trigger rule-based
-#     moderate_04_login = pd.DataFrame([{
-#         "login_hour": 1,  # 1 AM - very unusual hour (25 points - single indicator only, < 40 threshold)
-#         "login_dayofweek": 6,  # Sunday
-#         "is_weekend": 1,
-#         "time_since_last_login": 120.0,  # 2 minutes - very recent but above 60s threshold
-#         "device_changed": 0,  # Same device (avoid adding more rule points)
-#         "ip_changed": 0,  # Same IP
-#         "location_changed": 0,  # Same location
-#         "LoginAttempts": 4,  # Slightly elevated but not > 3 for rule (wait, > 3 should trigger... let me check)
-#         "failed_login": 1,  # Failed login (35 points - but this alone is < 40, so rule_flag should still be 0...)
-#         "high_login_attempts": 1  # This would trigger high_login_attempts rule
-#     }])
+    # Priority 5: Failed login (single attempt)
+    elif row.get('failed_login', 0) == 1:
+        reasons.append("Failed login attempt")
     
-#     # Actually, to get exactly 0.4, we need rule_flag = 0 and ml_score = 0.6667
-#     # But ML model rarely scores that high. Let's try with just unusual hour
-#     moderate_04_login = pd.DataFrame([{
-#         "login_hour": 0,  # Midnight - most unusual hour (25 points - single indicator, < 40)
-#         "login_dayofweek": 4,  # Friday
-#         "is_weekend": 0,
-#         "time_since_last_login": 200.0,  # ~3 minutes - recent but above rapid threshold
-#         "device_changed": 0,  # Same device
-#         "ip_changed": 0,  # Same IP  
-#         "location_changed": 0,  # Same location
-#         "LoginAttempts": 2,  # Normal attempts
-#         "failed_login": 0,  # No failures
-#         "high_login_attempts": 0  # Normal attempts
-#     }])
-#     result5 = hybrid_login_decision(moderate_04_login)
-#     print(f"Result: {result5}")
-#     print(f"Detailed Analysis:")
-#     print(f"  - Rule-based flag: {result5['rule_flag']} ({'Anomaly' if result5['rule_flag'] == 1 else 'Normal'})")
-#     print(f"  - Rule-based score: {result5['rule_score']}")
-#     print(f"  - ML-based score: {result5['ml_score']:.4f}")
-#     print(f"  - Hybrid score: {result5['hybrid_score']:.4f} (target: ~0.4, moderate threshold: {MODERATE_THRESHOLD}, anomaly threshold: {ANOMALY_THRESHOLD})")
-#     print(f"  - Final Decision: {'ANOMALY DETECTED' if result5['is_anomaly'] == 1 else 'MODERATE SUSPICION' if result5['is_moderate'] == 1 else 'NORMAL LOGIN'}")
-#     if 0.38 <= result5['hybrid_score'] <= 0.42:
-#         print(f"  - ✅ Target achieved: Score is approximately 0.4!")
-#     print()
+    # Priority 6: Unusual hour (lower priority but still relevant)
+    hour = row.get('login_hour', row.get('hour', -1))
+    if 0 <= hour <= 4:
+        # Format hour range for better readability
+        reasons.append(f"Login at unusual hour ({hour}:00-{(hour+1):02d}:00)")
     
-#     print("=" * 80)
-#     print("SUMMARY")
-#     print("=" * 80)
-#     print(f"Case 1 (Normal):      {'ANOMALY' if result1['is_anomaly'] == 1 else 'NORMAL'} - Hybrid Score: {result1['hybrid_score']:.4f} | Rule: {result1['rule_score']:.2f} | ML: {result1['ml_score']:.4f}")
-#     print(f"Case 2 (Suspicious):  {'ANOMALY' if result2['is_anomaly'] == 1 else 'NORMAL'} - Hybrid Score: {result2['hybrid_score']:.4f} | Rule: {result2['rule_score']:.2f} | ML: {result2['ml_score']:.4f}")
-#     print(f"Case 3 (Anomaly):     {'ANOMALY' if result3['is_anomaly'] == 1 else 'NORMAL'} - Hybrid Score: {result3['hybrid_score']:.4f} | Rule: {result3['rule_score']:.2f} | ML: {result3['ml_score']:.4f}")
-#     print(f"Case 4 (Very Low):    {'ANOMALY' if result4['is_anomaly'] == 1 else 'NORMAL'} - Hybrid Score: {result4['hybrid_score']:.4f} | Rule: {result4['rule_score']:.2f} | ML: {result4['ml_score']:.4f}")
-#     print(f"Case 5 (Moderate 0.4): {'ANOMALY' if result5['is_anomaly'] == 1 else 'MODERATE' if result5['is_moderate'] == 1 else 'NORMAL'} - Hybrid Score: {result5['hybrid_score']:.4f} | Rule: {result5['rule_score']:.2f} | ML: {result5['ml_score']:.4f}")
-#     print("=" * 80)
-
-
-
-#     # -------------------------------
-# # 4️⃣ MODERATE SUSPICION LOGIN
-# # -------------------------------
-
-# moderate_suspicion = pd.DataFrame([{
-#     "login_hour": 22,                 # Late-night login
-#     "login_dayofweek": 5,             # Saturday
-#     "is_weekend": 1,                  # Weekend
-#     "time_since_last_login": 900,     # 15 minutes
-#     "device_changed": 0,              # Same device
-#     "ip_changed": 1,                  # New IP
-#     "location_changed": 0,            # Same location
-#     "LoginAttempts": 4,               # Slightly elevated
-#     "failed_login": 1,                # One failure
-#     "high_login_attempts": 0          # Below rule threshold
-# }])
-
-# print("MODERATE SUSPICION LOGIN:")
-# print(hybrid_login_decision(moderate_suspicion), "\n")
+    # Priority 7: Rapid login (may indicate automated attack)
+    time_since = row.get('time_since_last_login', None)
+    if time_since is not None and time_since < 60:
+        reasons.append(f"Rapid login attempt ({int(time_since)}s after previous login)")
+    
+    # Combine reasons intelligently
+    if len(reasons) == 0:
+        # Fallback message if ML detected anomaly but no specific rules triggered
+        return "Unusual activity pattern detected"
+    elif len(reasons) == 1:
+        return reasons[0]
+    else:
+        # Combine top 2 most important reasons for context
+        return f"{reasons[0]}; {reasons[1]}"
