@@ -8,3 +8,9 @@ class User(BaseModel):
     phone: str
     cnic: str
     password: str  # hashed password
+    # stored in db.users
+    two_factor_enabled: False
+    # Add to user document when creating/updating
+    is_blocked: False
+    blocked_until: None
+    blocked_reason: None
