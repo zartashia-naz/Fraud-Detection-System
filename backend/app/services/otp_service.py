@@ -10,7 +10,9 @@ async def create_or_resend_otp(
     user_id: str,
     email: str,
     purpose: str,
+    metadata: dict | None = None,
 ):
+
     now = datetime.utcnow()
 
     existing = await db.otps.find_one({
@@ -38,15 +40,17 @@ async def create_or_resend_otp(
         otp_code = str(random.randint(100000, 999999))
 
         await db.otps.insert_one({
-            "user_id": user_id,
-            "email": email,
-            "otp": otp_code,
-            "purpose": purpose,
-            "is_used": False,
-            "created_at": now,
-            "last_sent_at": now,
-            "expires_at": now + timedelta(minutes=OTP_EXPIRY_MINUTES),
-        })
+    "user_id": user_id,
+    "email": email,
+    "otp": otp_code,
+    "purpose": purpose,
+    "metadata": metadata,
+    "is_used": False,
+    "created_at": now,
+    "last_sent_at": now,
+    "expires_at": now + timedelta(minutes=OTP_EXPIRY_MINUTES),
+})
+
 
     # 📧 Send email
     await send_email(
