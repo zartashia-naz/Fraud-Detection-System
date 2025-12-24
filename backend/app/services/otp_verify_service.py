@@ -1,17 +1,20 @@
 from datetime import datetime
-
 async def verify_otp(
     db,
     user_id: str,
     purpose: str,
     otp: str,
+    metadata: dict,
 ):
+
     record = await db.otps.find_one({
-        "user_id": user_id,
-        "purpose": purpose,
-        "otp": otp,
-        "is_used": False,
-    })
+    "user_id": user_id,
+    "purpose": purpose,
+    "otp": otp,
+    "is_used": False,
+    "metadata.transaction_id": metadata["transaction_id"]
+})
+
 
     if not record:
         raise ValueError("Invalid OTP")

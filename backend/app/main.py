@@ -14,6 +14,9 @@ from app.api.v1.routes.transaction_route import router as transaction_router
 from app.api.v1.routes.login_log_route import router as login_log_router
 from app.api.v1.routes.test_dsa_routes import router as dsa_test_router
 from app.api.v1.routes.test_db_route import router as test_db_router
+from app.api.v1.routes.user_route import router as user_router
+
+
 from app.api.v1.routes.trusted_device_route import router as trusted_device_router
 from app.api.v1.routes.otp_route import router as otp_router
 
@@ -30,7 +33,7 @@ app = FastAPI(
     version="1.0.0",
     description="Backend API for transaction & login anomaly detection"
 )
-
+app.include_router(user_router, prefix="/api/v1")
 
 # -----------------------------
 # CORS MIDDLEWARE
