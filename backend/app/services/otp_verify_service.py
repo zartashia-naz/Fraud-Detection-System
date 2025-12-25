@@ -64,4 +64,4 @@ async def verify_otp(
         {"$set": {"is_used": True, "verified_at": datetime.utcnow()}}
     )
 
-    return True                                                                                                                                                                                                          
+    return True                                                                                                                                                                                          
