@@ -2,9 +2,11 @@
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from bson import ObjectId
+from pydantic import BaseModel
 from app.db.mongodb import get_database
 from app.schemas.user_schema import UserResponse
 from app.core.security import get_current_user  # Reuse the existing get_current_user (returns payload)
+
 
 router = APIRouter(
     prefix="/users",
@@ -83,4 +85,40 @@ async def update_users_me(
         "email": updated_user["email"],
         "phone": updated_user["phone"],
         "cnic": updated_user["cnic"],
+    }
+
+# ===========================
+#   UPDATE 2FA SETTINGS
+# ===========================
+class Update2FARequest(BaseModel):
+    two_factor_enabled: bool
+
+
+@router.post("/update-2fa")
+async def update_2fa_settings(
+    request: Update2FARequest,
+    current_user=Depends(get_current_user),
+    db=Depends(get_database)
+):
+    """Enable or disable two-factor authentication"""
+    from bson import ObjectId
+    
+    user_id = ObjectId(current_user["id"])
+    
+    result = await db.users.update_one(
+        {"_id": user_id},
+        {"$set": {"two_factor_enabled": request.two_factor_enabled}}
+    )
+    
+    if result.modified_count == 0:
+        # Check if user exists
+        user = await db.users.find_one({"_id": user_id})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        # If user exists but no modification, it means the value was already set
+    
+    return {
+        "status": "success",
+        "message": f"Two-factor authentication {'enabled' if request.two_factor_enabled else 'disabled'}",
+        "two_factor_enabled": request.two_factor_enabled
     }
