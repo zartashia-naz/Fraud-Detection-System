@@ -1,12 +1,13 @@
+# app/schemas/anomaly_schema.py
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Dict
 
 class AnomalyCreate(BaseModel):
     is_anomaly: bool
-    event_type: str              # "transaction" | "login"
+    anomaly_type: str  # "login" | "transaction"
     anomaly_score: float
-    event_data: Dict             # raw event payload
+    details: Dict  # raw payload
 
 class AnomalyResponse(BaseModel):
     id: str
