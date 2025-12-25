@@ -15,12 +15,19 @@ async def create_or_resend_otp(
 
     now = datetime.utcnow()
 
-    existing = await db.otps.find_one({
+    query = {
         "user_id": user_id,
         "purpose": purpose,
         "is_used": False,
         "expires_at": {"$gt": now},
-    })
+    }
+
+    if metadata is not None:
+        query["metadata"] = metadata
+    else:
+        query["metadata"] = None
+
+    existing = await db.otps.find_one(query)
 
     if existing:
         last_sent = existing.get("last_sent_at")
@@ -40,16 +47,16 @@ async def create_or_resend_otp(
         otp_code = str(random.randint(100000, 999999))
 
         await db.otps.insert_one({
-    "user_id": user_id,
-    "email": email,
-    "otp": otp_code,
-    "purpose": purpose,
-    "metadata": metadata,
-    "is_used": False,
-    "created_at": now,
-    "last_sent_at": now,
-    "expires_at": now + timedelta(minutes=OTP_EXPIRY_MINUTES),
-})
+            "user_id": user_id,
+            "email": email,
+            "otp": otp_code,
+            "purpose": purpose,
+            "metadata": metadata,
+            "is_used": False,
+            "created_at": now,
+            "last_sent_at": now,
+            "expires_at": now + timedelta(minutes=OTP_EXPIRY_MINUTES),
+        })
 
 
     # 📧 Send email

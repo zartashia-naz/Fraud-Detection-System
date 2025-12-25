@@ -4,22 +4,30 @@ async def verify_otp(
     user_id: str,
     purpose: str,
     otp: str,
-    metadata: dict,
+    metadata: dict | None = None,
 ):
 
-    record = await db.otps.find_one({
-    "user_id": user_id,
-    "purpose": purpose,
-    "otp": otp,
-    "is_used": False,
-    "metadata.transaction_id": metadata["transaction_id"]
-})
+    now = datetime.utcnow()
 
+    query = {
+        "user_id": user_id,
+        "purpose": purpose,
+        "otp": otp,
+        "is_used": False,
+        "expires_at": {"$gt": now}
+    }
+
+    if metadata is not None:
+        query["metadata"] = metadata
+    else:
+        query["metadata"] = None
+
+    record = await db.otps.find_one(query)
 
     if not record:
         raise ValueError("Invalid OTP")
 
-    if record["expires_at"] < datetime.utcnow():
+    if record["expires_at"] < now:
         raise ValueError("OTP expired")
 
     await db.otps.update_one(
