@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
+from jose import jwt, JWTError
 from passlib.context import CryptContext
 
 # Reuse the same secret key and algorithm
