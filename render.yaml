@@ -8,9 +8,7 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: ./start.sh
     autoDeploy: true
-
-    runtime:
-      pythonVersion: 3.10
+    runtime: python3.10
 
     envVars:
       - key: MONGO_URI
