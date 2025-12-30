@@ -34,6 +34,7 @@ class TokenResponse(BaseModel):
     # access_token: str
     access_token: Optional[str] = None
     token_type: str = "bearer"
+    role: str = Field("user", description="User role: 'user' or 'admin'")  # Role for frontend routing
     requires_2fa: bool = False  # 🔥 NEW: For future 2FA
     risk_score: Optional[int] = None  # 🔥 NEW: For monitoring
     # ✅ ADD THESE NEW FIELDS
@@ -43,3 +44,5 @@ class TokenResponse(BaseModel):
     requires_device_trust: bool = Field(False, description="New device - ask user to trust it")  # ✅ NEW
     login_log_id: Optional[str] = Field(None, description="Login log ID for trust action")
     anomaly_reason: Optional[str] = Field(None, description="Reason for anomaly")
+    # Admin-specific fields (only populated for admin login)
+    user: Optional[dict] = Field(None, description="User/Admin profile info")

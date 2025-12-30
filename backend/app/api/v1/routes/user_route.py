@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from bson import ObjectId
 from pydantic import BaseModel
+from datetime import datetime, timedelta
 from app.db.mongodb import get_database
 from app.schemas.user_schema import UserResponse
 from app.core.security import get_current_user  # Reuse the existing get_current_user (returns payload)
@@ -12,6 +13,9 @@ router = APIRouter(
     prefix="/users",
     tags=["Users"]
 )
+
+# Activity update interval (only update last_active if older than this)
+ACTIVITY_UPDATE_INTERVAL = timedelta(minutes=5)
 
 # New dependency: gets the full user document from DB using the validated payload
 async def get_current_user_db(
@@ -36,6 +40,19 @@ async def get_current_user_db(
     if user is None:
         raise credentials_exception
 
+    # Update last_active if it's stale (rate-limited to avoid excessive DB writes)
+    last_active = user.get("last_active")
+    now = datetime.utcnow()
+    if last_active is None or (now - last_active) > ACTIVITY_UPDATE_INTERVAL:
+        # Fire-and-forget update - don't wait for it
+        try:
+            await db["users"].update_one(
+                {"_id": ObjectId(user_id)},
+                {"$set": {"last_active": now}}
+            )
+        except Exception:
+            pass  # Don't fail the request if activity tracking fails
+
     return user
 
 
@@ -48,6 +65,7 @@ async def read_users_me(current_user: dict = Depends(get_current_user_db)):
         "email": current_user["email"],
         "phone": current_user["phone"],
         "cnic": current_user["cnic"],
+        "two_factor_enabled": current_user.get("two_factor_enabled", False),
     }
 
 # ... existing imports ...
@@ -85,6 +103,7 @@ async def update_users_me(
         "email": updated_user["email"],
         "phone": updated_user["phone"],
         "cnic": updated_user["cnic"],
+        "two_factor_enabled": updated_user.get("two_factor_enabled", False),
     }
 
 # ===========================

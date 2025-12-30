@@ -51,3 +51,6 @@ class MongoDSA:
         await self.db.login_logs.create_index([("user_id", 1), ("login_time", -1)])
         await self.db.anomaly_logs.create_index([("user_id", 1), ("detected_at", -1)])
         await self.db.anomaly_logs.create_index([("anomaly_score", -1)])
+        # Indexes for optimized admin user list queries
+        await self.db.flagged_transactions.create_index([("user_id", 1), ("transaction_date", -1)])
+        await self.db.anomaly_logs.create_index([("user_id", 1), ("anomaly_type", 1), ("detected_at", -1)])
