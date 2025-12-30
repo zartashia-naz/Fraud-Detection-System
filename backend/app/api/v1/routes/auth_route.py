@@ -39,6 +39,11 @@ import asyncio
 
 from bson import ObjectId
 from app.api.v1.routes.anomaly_route import handle_anomaly
+
+# Admin audit logging
+from app.services.audit_service import log_admin_action, AuditActions
+from app.core.admin_security import get_client_ip as admin_get_client_ip, get_user_agent
+
 router = APIRouter(tags=["Authentication"])
 
 HIGH_RISK_THRESHOLD = 70  # Risk score threshold for blocking account
@@ -56,6 +61,7 @@ async def signup(user: UserSignup, db=Depends(get_database)):
     new_user["password"] = hash_password(user.password)
     new_user["created_at"] = datetime.utcnow()
     new_user["status"] = "active"
+    new_user["role"] = "user"  # Always set role to "user" on signup
     new_user["two_factor_enabled"] = False
 
     # Add block fields
@@ -76,7 +82,11 @@ async def signup(user: UserSignup, db=Depends(get_database)):
 # ===========================
 @router.post("/login", response_model=TokenResponse)
 async def login(credentials: UserLogin, request: Request, db=Depends(get_database)):
-
+    """
+    Unified login endpoint for both users and admins.
+    - Admin login: Simple auth, no anomaly detection, no login logs
+    - User login: Full anomaly detection pipeline with ML
+    """
     user = await db.users.find_one({"email": credentials.email})
 
     # ❌ Invalid email
@@ -88,20 +98,101 @@ async def login(credentials: UserLogin, request: Request, db=Depends(get_databas
         )
         raise HTTPException(status_code=400, detail="Invalid email or password")
 
+    # Get user role
+    user_role = user.get("role", "user")
+
+    # ========================================
+    # ADMIN LOGIN (Simple auth, no anomaly detection)
+    # ========================================
+    if user_role == "admin":
+        # Verify password
+        if not verify_password(credentials.password, user["password"]):
+            await log_admin_action(
+                db, str(user["_id"]), user["email"],
+                AuditActions.ADMIN_LOGIN_FAILED,
+                details={"reason": "Invalid password"},
+                ip_address=admin_get_client_ip(request)
+            )
+            raise HTTPException(status_code=400, detail="Invalid email or password")
+
+        # Check if blocked
+        if user.get("is_blocked", False):
+            raise HTTPException(
+                status_code=403,
+                detail="Admin account is disabled"
+            )
+
+        # Create token with role
+        token = create_access_token({
+            "id": str(user["_id"]),
+            "email": user["email"],
+            "role": "admin"
+        })
+
+        # Update last login and last active
+        now = datetime.utcnow()
+        update_result = await db.users.update_one(
+            {"_id": user["_id"]},
+            {"$set": {"last_login": now, "last_active": now}}
+        )
+        print(f"[ADMIN LOGIN] Updated last_login and last_active for admin {user['email']} at {now}. Modified: {update_result.modified_count}")
+
+        # Log successful admin login (audit log only, no login_logs)
+        await log_admin_action(
+            db, str(user["_id"]), user["email"],
+            AuditActions.ADMIN_LOGIN,
+            ip_address=admin_get_client_ip(request),
+            user_agent=get_user_agent(request)
+        )
+
+        # Return admin response
+        return TokenResponse(
+            access_token=token,
+            token_type="bearer",
+            role="admin",
+            requires_2fa=False,
+            risk_score=0,
+            is_moderate_risk=False,
+            is_high_risk=False,
+            is_trusted_device=True,
+            requires_device_trust=False,
+            user={
+                "id": str(user["_id"]),
+                "email": user["email"],
+                "first_name": user.get("first_name", "Admin"),
+                "last_name": user.get("last_name", "User"),
+                "role": "admin"
+            }
+        )
+
+    # ========================================
+    # USER LOGIN (Full anomaly detection)
+    # ========================================
     # ✅ Check if user is already blocked
     if user.get("is_blocked", False):
         blocked_until = user.get("blocked_until")
-        if blocked_until and blocked_until > datetime.utcnow():
+        blocked_reason = user.get("blocked_reason", "Account suspended")
+
+        # Case 1: Permanent block (no end date)
+        if blocked_until is None:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Account suspended. Reason: {blocked_reason}"
+            )
+
+        # Case 2: Temporary block - check if still active
+        if blocked_until > datetime.utcnow():
             raise HTTPException(
                 status_code=403,
                 detail=f"Account temporarily blocked until {blocked_until.strftime('%Y-%m-%d %H:%M:%S')}. "
-                       f"Reason: {user.get('blocked_reason')}"
+                       f"Reason: {blocked_reason}"
             )
-        else:
-            await db.users.update_one(
-                {"_id": user["_id"]},
-                {"$set": {"is_blocked": False, "blocked_until": None, "blocked_reason": None}}
-            )
+
+        # Case 3: Block has expired - auto-unblock
+        await db.users.update_one(
+            {"_id": user["_id"]},
+            {"$set": {"is_blocked": False, "blocked_until": None, "blocked_reason": None, "status": "active"}}
+        )
 
     # ❌ Wrong password
     if not verify_password(credentials.password, user["password"]):
@@ -245,6 +336,7 @@ Your Security Team
 
     # 🔐 OTP required → send temp token
     if otp_required:
+        print(f"[LOGIN] OTP required for user {user['email']}. is_trusted_device={context['is_trusted_device']}, is_moderate={context['is_moderate']}, risk_score={context['risk_score']}, 2fa_enabled={user.get('two_factor_enabled', False)}")
         await create_or_resend_otp(
             db=db,
             user_id=str(user["_id"]),
@@ -255,11 +347,13 @@ Your Security Team
         temp_token = create_temp_token({
             "id": str(user["_id"]),
             "email": user["email"],
+            "role": user.get("role", "user"),
         })
 
         return TokenResponse(
             access_token=temp_token,
             token_type="bearer",
+            role="user",
             requires_2fa=True,
             requires_device_trust=requires_device_trust,
             risk_score=context["risk_score"],
@@ -268,17 +362,34 @@ Your Security Team
             is_trusted_device=context["is_trusted_device"],
             login_log_id=login_log_id,
             anomaly_reason=context["anomaly_reason"],
+            user={
+                "id": str(user["_id"]),
+                "email": user["email"],
+                "first_name": user.get("first_name", ""),
+                "last_name": user.get("last_name", ""),
+                "role": "user"
+            }
         )
 
     # ✅ No OTP → real token
     token = create_access_token({
         "id": str(user["_id"]),
         "email": user["email"],
+        "role": user.get("role", "user"),
     })
+
+    # Update last_login and last_active for successful login
+    now = datetime.utcnow()
+    update_result = await db.users.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"last_login": now, "last_active": now}}
+    )
+    print(f"[LOGIN] Updated last_login and last_active for user {user['email']} at {now}. Modified: {update_result.modified_count}")
 
     return TokenResponse(
         access_token=token,
         token_type="bearer",
+        role="user",
         requires_2fa=False,
         requires_device_trust=requires_device_trust,
         risk_score=context["risk_score"],
@@ -287,6 +398,13 @@ Your Security Team
         is_trusted_device=context["is_trusted_device"],
         login_log_id=login_log_id,
         anomaly_reason=context["anomaly_reason"],
+        user={
+            "id": str(user["_id"]),
+            "email": user["email"],
+            "first_name": user.get("first_name", ""),
+            "last_name": user.get("last_name", ""),
+            "role": "user"
+        }
     )
 
 # ===========================
@@ -315,14 +433,26 @@ async def verify_login_otp(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    user_role = current_user.get("role", "user")
+
     token = create_access_token({
         "id": current_user["id"],
         "email": current_user["email"],
+        "role": user_role,
     })
+
+    # Update last_login and last_active for successful OTP verification
+    now = datetime.utcnow()
+    update_result = await db.users.update_one(
+        {"_id": ObjectId(current_user["id"])},
+        {"$set": {"last_login": now, "last_active": now}}
+    )
+    print(f"[OTP VERIFY] Updated last_login and last_active for user {current_user['email']} at {now}. Modified: {update_result.modified_count}")
 
     return TokenResponse(
         access_token=token,
         token_type="bearer",
+        role=user_role,
         requires_2fa=False,
     )
 
