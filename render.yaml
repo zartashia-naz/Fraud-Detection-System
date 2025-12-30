@@ -2,13 +2,16 @@ services:
   - type: web
     name: linklock-backend
     env: python
-    region: oregon        # or frankfurt if closer
-    plan: free            # start with free; upgrade if needed
-    branch: main          # deploy on pushes to main branch
+    region: oregon
+    plan: free
+    branch: main
     buildCommand: pip install -r requirements.txt
     startCommand: ./start.sh
+    autoDeploy: true
 
-    # Environment Variables (stored safely in Render dashboard)
+    runtime:
+      pythonVersion: 3.10
+
     envVars:
       - key: MONGO_URI
         sync: false
@@ -19,13 +22,7 @@ services:
       - key: MODEL_PATH
         sync: false
 
-    runtime:
-      pythonVersion: 3.10  # or 3.11 if you're using that
-
-    autoDeploy: true        # auto updates on git push
-
-# Optional: If you want render to create a Redis instance automatically
-databases:
-  - name: linklock-redis
+  - type: redis
+    name: linklock-redis
     plan: free
-    ipAllowList: []         # Allow all
+    region: oregon
