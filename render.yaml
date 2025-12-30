@@ -8,7 +8,6 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: ./start.sh
     autoDeploy: true
-    runtime: python3.10
 
     envVars:
       - key: MONGO_URI
@@ -24,3 +23,4 @@ services:
     name: linklock-redis
     plan: free
     region: oregon
+    ipAllowList: []
