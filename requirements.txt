@@ -79,12 +79,12 @@ email-validator==2.0.0
 # ---- ML / Data Science ----
 pandas>=2.1
 scipy>=1.10
-scikit-learn==1.5.2
+scikit-learn==1.7.2
 joblib==1.3.2
 
 # ---- Deep Learning ----
-tensorflow-cpu==2.16.2
-keras==3.0.0
+tensorflow==2.15.0
+keras==2.15.0
 
 
 # ---- File uploads / Static ----
