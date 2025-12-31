@@ -101,3 +101,16 @@ $RECYCLE.BIN/
 __pycache__/
 *.pyc
 node_modules
+
+tests/
+bank_transactions_data_1.csv
+login_activity_data.csv
+login_events_tested.csv
+login_events_scored.csv
+login_event_features.csv
+transaction_autoencoder_kfold_eval.csv
+transaction_autoencoder_predictions.csv
+transaction_eval_results.csv
+transaction_features.csv
+transaction_model_kfold_eval.csv
+transaction_predictions.csv
