@@ -22,8 +22,9 @@ pydantic-settings==2.3.4
 email-validator==2.0.0         # email validation used by pydantic
 
 # ---- ML / Data Science ----
-numpy==1.26.4
-pandas==2.2.2
+# numpy==1.26.4
+# pandas==2.2.2 
+pandas>=2.2.3
 scipy==1.11.3
 scikit-learn==1.5.2            # Isolation Forest, other models
 joblib==1.3.2                  # model serialization/IO
