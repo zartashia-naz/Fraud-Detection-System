@@ -52,6 +52,9 @@ app.add_middleware(
         "http://127.0.0.1:8080",
          "http://127.0.0.1:8081",
          "http://localhost:8081",
+         "https://fraud-detection-frontend-b2lsehmok-zartashia-nazs-projects.vercel.app/",
+         "https://fraud-detection-frontend-git-main-zartashia-nazs-projects.vercel.app/",
+
     ],
     allow_credentials=True,
     allow_methods=["*"],
