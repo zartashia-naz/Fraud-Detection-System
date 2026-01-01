@@ -11,7 +11,7 @@ async def send_email(to_email: str, subject: str, body: str):
 
     msg.attach(MIMEText(body, "plain"))
 
-    server = smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT)
+    server = smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT)
     server.starttls()
 
     # 🔐 Login with SYSTEM email only
