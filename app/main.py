@@ -54,6 +54,7 @@ app.add_middleware(
          "http://localhost:8081",
          "https://fraud-detection-frontend-b2lsehmok-zartashia-nazs-projects.vercel.app/",
          "https://fraud-detection-frontend-git-main-zartashia-nazs-projects.vercel.app/",
+        "https://fraud-detection-frontend-zeta.vercel.app"
 
     ],
     allow_credentials=True,
