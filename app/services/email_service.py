@@ -1,26 +1,25 @@
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import resend
 from app.core.config import settings
 
+# Initialize Resend once
+resend.api_key = settings.RESEND_API_KEY
+
+
 async def send_email(to_email: str, subject: str, body: str):
-    msg = MIMEMultipart()
-    msg["From"] = settings.SMTP_USER          # SYSTEM EMAIL
-    msg["To"] = to_email                      # USER EMAIL
-    msg["Subject"] = subject
+    """
+    Sends email using Resend (HTTP-based).
+    Function signature unchanged to avoid breaking imports.
+    """
 
-    msg.attach(MIMEText(body, "plain"))
+    try:
+        resend.Emails.send({
+            "from": settings.EMAIL_FROM,   # SYSTEM EMAIL
+            "to": to_email,                # USER EMAIL
+            "subject": subject,
+            "text": body,                  # plain text (perfect for OTP)
+        })
 
-    server = smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT)
-    server.starttls()
-
-    # 🔐 Login with SYSTEM email only
-    server.login(settings.SMTP_USER, settings.SMTP_PASS)
-
-    server.sendmail(
-        settings.SMTP_USER,
-        to_email,
-        msg.as_string()
-    )
-
-    server.quit()
+    except Exception as e:
+        # Important: log but don't crash the whole API
+        print(f"❌ Email sending failed: {e}")
+        raise
