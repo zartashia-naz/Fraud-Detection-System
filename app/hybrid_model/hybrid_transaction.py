@@ -41,6 +41,11 @@ AE_SCALER_PATH = os.path.join(
 # LOAD MODELS / SCALERS
 # --------------------------------------------------
 try:
+    encoders = joblib.load(os.path.join(BASE_DIR, "ml", "Transaction_pipeline", "transaction_encoders.pkl"))
+except Exception:
+    encoders = {}
+
+try:
     isolation_forest = joblib.load(ISO_MODEL_PATH)
 except Exception as e:
     raise RuntimeError(f"Failed to load Isolation Forest model: {e}")
@@ -63,14 +68,23 @@ except Exception:
 # --------------------------------------------------
 # HYBRID PARAMETERS
 # --------------------------------------------------
-RULE_WEIGHT = 0.4
-ML_WEIGHT = 0.6
+RULE_WEIGHT = 0.6
+ML_WEIGHT = 0.4
 
 ISO_WEIGHT = 0.5
 AE_WEIGHT = 0.5
 
-MODERATE_THRESHOLD = 0.35
-ANOMALY_THRESHOLD = 0.70
+MODERATE_THRESHOLD = 0.4
+ANOMALY_THRESHOLD = 0.65
+
+# Hard-code features (matches preprocessing.ipynb feature_cols)
+FEATURE_COLS = [
+    "TransactionAmount", "hour", "day_of_week", "day", "time_since_last",
+    "tx_last_1hr", "tx_last_24hr", "amount_zscore", "amount_to_balance",
+    "device_changed", "ip_changed", "location_changed", "TransactionType",
+    "Location", "DeviceID", "IP Address", "MerchantID", "Channel",
+    "CustomerAge", "LoginAttempts", "AccountBalance"
+]
 
 # --------------------------------------------------
 # FEATURE BUILDER
@@ -78,12 +92,11 @@ ANOMALY_THRESHOLD = 0.70
 def _ensure_features_df(
     current_txn: dict,
     last_txn: Optional[dict],
-    feature_names: List[str],
+    feature_names: List[str] = FEATURE_COLS,
 ) -> pd.DataFrame:
 
     txn_time = current_txn.get("transaction_date", datetime.utcnow())
     last_time = last_txn.get("transaction_date") if last_txn else None
-
     time_since_last = (
         (txn_time - last_time).total_seconds()
         if last_time and isinstance(last_time, datetime)
@@ -110,10 +123,24 @@ def _ensure_features_df(
         "location_changed": current_txn.get("location_changed", 0),
         "LoginAttempts": current_txn.get("login_attempts", 0),
         "AccountBalance": current_txn.get("account_balance", 0.0),
+        "TransactionType": current_txn.get("transaction_type", "Debit"),
+        "Location": current_txn.get("location", {}).get("city", "Unknown"),
+        "DeviceID": current_txn.get("device_id", "Unknown"),
+        "IP Address": current_txn.get("ip", "0.0.0.0"),
+        "MerchantID": current_txn.get("merchant_id", "M000"),
+        "Channel": current_txn.get("channel", "Online"),
+        "CustomerAge": current_txn.get("customer_age", 30),
     }
 
     features = {name: base_map.get(name, 0.0) for name in feature_names}
-    return pd.DataFrame([features])
+    df = pd.DataFrame([features])
+
+    # Apply encoding to categorical columns
+    for col, encoder in encoders.items():
+        if col in df.columns:
+            df[col] = encoder.transform(df[col].astype(str))
+
+    return df
 
 # --------------------------------------------------
 # MAIN HYBRID DECISION FUNCTION
@@ -121,17 +148,18 @@ def _ensure_features_df(
 def hybrid_transaction_decision(
     current_txn: dict,
     last_txn: Optional[dict] = None,
+    user_stats: Optional[dict] = None,
 ) -> Dict[str, Any]:
 
     reasons: List[Dict[str, Any]] = []
 
     # ================= RULE-BASED =================
-    rule_out = compute_rule_based_score(current_txn, last_txn)
+    rule_out = compute_rule_based_score(current_txn, last_txn, user_stats)
     total_rule_score = rule_out.get("total_score", 0)
     rule_results = rule_out.get("rule_results", {})
 
     rule_flag = 1 if total_rule_score >= 40 else 0
-    rule_score = min(total_rule_score / 100.0, 1.0)
+    rule_score = min(total_rule_score / 200.0, 1.0)
 
     for rule_name, result in rule_results.items():
         if result.get("score", 0) > 0:
@@ -139,62 +167,60 @@ def hybrid_transaction_decision(
                 "source": "rule",
                 "code": rule_name.upper(),
                 "message": result.get("message", "Rule triggered"),
-                "severity": "medium" if result["score"] < 70 else "high",
+                "severity": "high" if result["score"] >= 40 else "medium",
             })
 
     # ================= ML (ISOLATION FOREST) =================
-    iso_features = (
-        list(iso_scaler.feature_names_in_)
-        if iso_scaler and hasattr(iso_scaler, "feature_names_in_")
-        else list(_ensure_features_df(current_txn, last_txn, []).columns)
-    )
+    iso_features = FEATURE_COLS
+    try:
+        features_df = _ensure_features_df(current_txn, last_txn, iso_features)
+        X_iso = iso_scaler.transform(features_df[iso_features]) if iso_scaler else features_df[iso_features].values
+        iso_raw = isolation_forest.decision_function(X_iso)[0]
+        ml_iso_score = max(0.0, min((-iso_raw + 0.5), 1.0))
 
-    features_df = _ensure_features_df(current_txn, last_txn, iso_features)
-
-    X_iso = (
-        iso_scaler.transform(features_df[iso_features])
-        if iso_scaler
-        else features_df[iso_features].values
-    )
-
-    iso_raw = isolation_forest.decision_function(X_iso)[0]
-    ml_iso_score = max(0.0, min((-iso_raw + 0.5), 1.0))
-
-    if ml_iso_score > 0.6:
+        if ml_iso_score > 0.6:
+            reasons.append({
+                "source": "ml",
+                "code": "ISO_ANOMALY",
+                "message": "Unusual transaction pattern detected compared to historical behavior.",
+                "severity": "high",
+            })
+    except Exception as e:
+        print(f"ML Iso error: {e}")
+        ml_iso_score = 0.5
         reasons.append({
             "source": "ml",
-            "code": "ISO_ANOMALY",
-            "message": "Unusual transaction pattern detected compared to historical behavior.",
-            "severity": "high",
+            "code": "ISO_ERROR",
+            "message": "Isolation Forest failed; neutral score applied.",
+            "severity": "medium",
         })
 
     # ================= ML (AUTOENCODER) =================
-    ae_features = (
-        list(ae_scaler.feature_names_in_)
-        if ae_scaler and hasattr(ae_scaler, "feature_names_in_")
-        else iso_features
-    )
+    ae_features = FEATURE_COLS
+    try:
+        ae_df = _ensure_features_df(current_txn, last_txn, ae_features)
+        X_ae = ae_scaler.transform(ae_df[ae_features]) if ae_scaler else ae_df[ae_features].values
+        recon = autoencoder.predict(X_ae, verbose=0)
+        mse = np.mean(np.square(X_ae - recon), axis=1)[0]
 
-    ae_df = _ensure_features_df(current_txn, last_txn, ae_features)
+        ml_ae_score = 1.0 - np.exp(-mse / 1e-3)
+        ml_ae_score = max(0.0, min(ml_ae_score, 1.0))
 
-    X_ae = (
-        ae_scaler.transform(ae_df[ae_features])
-        if ae_scaler
-        else ae_df[ae_features].values
-    )
-
-    recon = autoencoder.predict(X_ae, verbose=0)
-    mse = np.mean(np.square(X_ae - recon), axis=1)[0]
-
-    ml_ae_score = 1.0 - np.exp(-mse / 1e-3)
-    ml_ae_score = max(0.0, min(ml_ae_score, 1.0))
-
-    if ml_ae_score > 0.6:
+        if ml_ae_score > 0.6:
+            reasons.append({
+                "source": "ml",
+                "code": "AE_RECON_ERROR",
+                "message": "Autoencoder reconstruction error indicates abnormal behavior.",
+                "severity": "high",
+            })
+    except Exception as e:
+        print(f"ML AE error: {e}")
+        ml_ae_score = 0.5
         reasons.append({
             "source": "ml",
-            "code": "AE_RECON_ERROR",
-            "message": "Autoencoder reconstruction error indicates abnormal behavior.",
-            "severity": "high",
+            "code": "AE_ERROR",
+            "message": "Autoencoder failed; neutral score applied.",
+            "severity": "medium",
         })
 
     # ================= SCORE FUSION =================
@@ -224,18 +250,6 @@ def hybrid_transaction_decision(
 
     reason_summary = "; ".join(r["message"] for r in reasons) if reasons else "No risk detected."
 
-    # # Rule-based reasons
-    # for rule_name, result in rule_results.items():
-    #  if result.get("score", 0) > 0:
-    #     reasons.append({
-    #         "source": "rule",
-    #         "code": rule_name.upper(),
-    #         "message": result["message"],
-    #         "severity": "high" if result["score"] >= 40 else "medium"
-    #     })
-
-
-    # ================= FINAL RESPONSE =================
     return {
         "event_type": "transaction",
         "rule_flag": rule_flag,
@@ -251,3 +265,4 @@ def hybrid_transaction_decision(
         "reasons": reasons,
         "reason_summary": reason_summary,
     }
+

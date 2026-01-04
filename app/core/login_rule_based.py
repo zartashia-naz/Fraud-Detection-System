@@ -48,7 +48,7 @@ class RuleBasedDetector:
                 "message": "Login from a new or different location."
             },
             "failed_login": {
-                "weight": 35,
+                "weight": 20,
                 "message": "Failed login attempt detected."
             },
             "rapid_login": {

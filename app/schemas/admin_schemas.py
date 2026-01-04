@@ -41,6 +41,7 @@ class AdminProfile(BaseModel):
     is_active: bool = True
 
 
+
 # ========================================
 # DASHBOARD SCHEMAS
 # ========================================
@@ -56,7 +57,7 @@ class DashboardStats(BaseModel):
 
 
 class KPIItem(BaseModel):
-    """Single KPI with change indicator"""
+    """Single KPI with change indicator (KEEP FOR OTHER ENDPOINTS)"""
     value: float
     change: float  # Percentage change from previous period
     trend: str  # "up", "down", "stable"
@@ -64,11 +65,40 @@ class KPIItem(BaseModel):
 
 
 class EnhancedStatsResponse(BaseModel):
-    """Enhanced dashboard statistics with 4 KPIs"""
+    """Enhanced dashboard statistics with 4 KPIs (KEEP FOR OTHER ENDPOINTS)"""
     total_users: KPIItem
     volume_today: KPIItem  # Transaction volume
     fraud_today: KPIItem  # Detected fraud count
     fraud_prevented: KPIItem  # Blocked transactions value
+
+
+# 🔥 NEW: FLAT EnhancedDashboardStats - EXACTLY matches frontend.tsx expectations
+class EnhancedDashboardStats(BaseModel):
+    """FLAT numeric values for React frontend dashboard.tsx - FIXES [object Object]"""
+    total_users: int = 0
+    users_change_wow: float = 0.0  # Week-over-week % change
+
+    total_transaction_volume_today: float = 0.0
+    volume_change_wow: float = 0.0  # Day-over-day % change
+
+    fraud_detected_today: int = 0
+    fraud_change_wow: float = 0.0  # Day-over-day % change
+
+    fraud_prevented_value: float = 0.0
+    blocked_transactions_today: int = 0
+
+    # Optional enhanced fields (frontend fallback uses these)
+    model_accuracy: float = 0.0
+    detection_rate: float = 0.0
+    false_positive_rate: float = 0.0
+    avg_response_time_ms: int = 0
+    high_risk_users: int = 0
+    critical_alerts_pending: int = 0
+
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
 
 
 class FraudTrendItem(BaseModel):
@@ -115,6 +145,121 @@ class ActiveUserItem(BaseModel):
     risk_score: int
     last_activity: datetime
 
+
+# ========================================
+# NEW VISUALIZATION SCHEMAS (for other dashboard charts)
+# ========================================
+
+class RiskScoreTrendItem(BaseModel):
+    """Fraud risk score trend for line chart"""
+    date: str
+    avg_risk_score: float
+    max_risk_score: float
+    high_risk_count: int
+
+
+class RiskScoreTrendsResponse(BaseModel):
+    """Risk score trends response"""
+    data: List[RiskScoreTrendItem]
+
+
+class TransactionStatusItem(BaseModel):
+    """Transaction status breakdown for pie chart"""
+    status: str
+    count: int
+    percentage: float
+
+
+class TransactionStatusBreakdownResponse(BaseModel):
+    """Transaction status breakdown response"""
+    data: List[TransactionStatusItem]
+
+
+class SuspiciousLoginLocationItem(BaseModel):
+    """Suspicious login location for map view"""
+    city: str
+    country_name: str
+    suspicious_login_count: int
+    blocked_count: int
+    risk_level: str
+
+
+class SuspiciousLoginLocationsResponse(BaseModel):
+    """Suspicious locations response"""
+    data: List[SuspiciousLoginLocationItem]
+
+
+class TopFailedLoginUserItem(BaseModel):
+    """Top failed login user for bar chart"""
+    user_name: str
+    user_email: str
+    failed_login_count: int
+    risk_score: float
+    is_blocked: bool
+
+
+class TopFailedLoginsResponse(BaseModel):
+    """Top failed logins response"""
+    data: List[TopFailedLoginUserItem]
+
+
+class FraudHeatmapItem(BaseModel):
+    """Fraud heatmap data point"""
+    day: str
+    hour: int
+    intensity: float  # 0.0 to 1.0
+
+
+class FraudHeatmapResponse(BaseModel):
+    """Fraud heatmap response"""
+    data: List[FraudHeatmapItem]
+
+
+class ClusterAccountItem(BaseModel):
+    """Account in a suspicious cluster"""
+    user_name: str
+    risk_score: float
+
+
+class DeviceIPClusterItem(BaseModel):
+    """Device/IP cluster for network diagram"""
+    cluster_id: str
+    device_id: Optional[str] = None
+    ip_address: Optional[str] = None
+    total_accounts: int
+    is_suspicious: bool
+    accounts: List[ClusterAccountItem]
+
+
+class DeviceIPClustersResponse(BaseModel):
+    """Device/IP clusters response"""
+    data: List[DeviceIPClusterItem]
+
+
+class OTPFunnelStageItem(BaseModel):
+    """OTP funnel stage"""
+    stage: str  # "sent", "delivered", "verified"
+    count: int
+    percentage: float
+
+
+class OTPFunnelResponse(BaseModel):
+    """OTP funnel response"""
+    data: List[OTPFunnelStageItem]
+
+
+class FraudClassificationItem(BaseModel):
+    """Fraud classification for pie chart"""
+    classification: str  # "normal", "flagged", "blocked"
+    count: int
+    percentage: float
+    trend: str  # "up", "down", "stable"
+    change_percentage: float
+
+
+class FraudClassificationResponse(BaseModel):
+    """Fraud classification response"""
+    data: List[FraudClassificationItem]
 
 # ========================================
 # USER MANAGEMENT SCHEMAS

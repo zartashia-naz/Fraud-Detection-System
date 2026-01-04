@@ -1,4 +1,3 @@
-
 from fastapi import APIRouter, HTTPException, Depends, Request
 from datetime import datetime, timedelta
 
@@ -46,7 +45,7 @@ from app.core.admin_security import get_client_ip as admin_get_client_ip, get_us
 
 router = APIRouter(tags=["Authentication"])
 
-HIGH_RISK_THRESHOLD = 70  # Risk score threshold for blocking account
+HIGH_RISK_THRESHOLD = 75  # Risk score threshold for blocking account
 
 # ===========================
 #           SIGNUP
@@ -324,12 +323,20 @@ Your Security Team
     new_device = not context["is_trusted_device"]
     otp_required = False
 
-    # Determine OTP requirement
+    # ✅ FIXED: Context-aware trust - trusted devices still require OTP for risky contexts
     if context["is_trusted_device"]:
-        otp_required = False
+        # Trusted device, but check if context changed
+        if context["is_moderate"] == 1:
+            # Context changed (location/IP/etc) - require OTP even on trusted device
+            otp_required = True
+        else:
+            # Trusted device with normal context - no OTP needed
+            otp_required = False
     elif context["is_moderate"] == 1:
+        # Untrusted device with moderate risk - require OTP
         otp_required = True
     elif context["risk_score"] < 30 and user_2fa_enabled:
+        # Low risk but user has 2FA enabled - require OTP
         otp_required = True
 
     requires_device_trust = new_device and not otp_required
@@ -514,7 +521,51 @@ async def _create_login_log(
         "status": status,
     }
 
-    if is_trusted_device and status == "success":
+    # ✅ FIXED: Always run risk assessment for all logins (trusted or not)
+    try:
+        features_df = extract_login_features(
+            current_login={
+                "login_time": login_log["login_time"],
+                "device_id": device_id,
+                "device_name": device_name,
+                "ip_address": ip_address,
+                "location": location,
+                "login_attempts": login_attempts,
+            },
+            previous_login=previous_login_doc,
+            login_status=status,
+            is_device_trusted=is_trusted_device,  # Pass trust status to feature extractor
+        )
+        hybrid_result = hybrid_login_decision(features_df)
+        
+        # Always store the full risk assessment
+        login_log.update({
+            "rule_flag": hybrid_result.get("rule_flag", 0),
+            "rule_score": hybrid_result.get("rule_score", 0.0),
+            "ml_score": hybrid_result.get("ml_score", 0.0),
+            "hybrid_score": hybrid_result.get("hybrid_score", 0.0),
+            "is_moderate": hybrid_result.get("is_moderate", 0),
+            "is_anomaly": bool(hybrid_result.get("is_anomaly", 0)),
+            "risk_score": int(float(hybrid_result.get("hybrid_score", 0)) * 100),
+            "anomaly_reason": hybrid_result.get("anomaly_reason"),
+            "is_trusted_device_login": is_trusted_device,  # Track if trusted device was used
+        })
+        
+        # For trusted devices with successful login and normal context, we can still grant access
+        # but we keep the risk score visible for monitoring/analytics
+        if is_trusted_device and status == "success":
+            location_changed = features_df['location_changed'].iloc[0] if 'location_changed' in features_df.columns else 0
+            ip_changed = features_df['ip_changed'].iloc[0] if 'ip_changed' in features_df.columns else 0
+            
+            if location_changed == 1 or ip_changed == 1:
+                # Context changed - mark for step-up auth
+                login_log["trust_context_changed"] = True
+            else:
+                # Normal context - but still show real risk score
+                login_log["trust_context_changed"] = False
+                
+    except Exception as e:
+        print(f"[LOGIN LOG ERROR] Risk assessment failed: {e}")
         login_log.update({
             "rule_flag": 0,
             "rule_score": 0.0,
@@ -524,41 +575,6 @@ async def _create_login_log(
             "is_anomaly": False,
             "risk_score": 0,
         })
-    else:
-        try:
-            features_df = extract_login_features(
-                current_login={
-                    "login_time": login_log["login_time"],
-                    "device_id": device_id,
-                    "device_name": device_name,
-                    "ip_address": ip_address,
-                    "location": location,
-                    "login_attempts": login_attempts,
-                },
-                previous_login=previous_login_doc,
-                login_status=status,
-            )
-            hybrid_result = hybrid_login_decision(features_df)
-            login_log.update({
-                "rule_flag": hybrid_result.get("rule_flag", 0),
-                "rule_score": hybrid_result.get("rule_score", 0.0),
-                "ml_score": hybrid_result.get("ml_score", 0.0),
-                "hybrid_score": hybrid_result.get("hybrid_score", 0.0),
-                "is_moderate": hybrid_result.get("is_moderate", 0),
-                "is_anomaly": bool(hybrid_result.get("is_anomaly", 0)),
-                "risk_score": int(float(hybrid_result.get("hybrid_score", 0)) * 100),
-                "anomaly_reason": hybrid_result.get("anomaly_reason"),
-            })
-        except Exception:
-            login_log.update({
-                "rule_flag": 0,
-                "rule_score": 0.0,
-                "ml_score": 0.0,
-                "hybrid_score": 0.0,
-                "is_moderate": 0,
-                "is_anomaly": False,
-                "risk_score": 0,
-            })
 
     result = await db.login_logs.insert_one(login_log)
 
@@ -577,4 +593,3 @@ async def _create_login_log(
         "is_trusted_device": is_trusted_device,
         "anomaly_reason": login_log.get("anomaly_reason"),
     }
-

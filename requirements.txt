@@ -50,4 +50,4 @@ prometheus-client==0.17.0      # metrics (optional)
 
 PyJWT==2.10.1
 resend
-
+user-agents
