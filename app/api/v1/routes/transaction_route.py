@@ -1,20 +1,13 @@
 """
-UPDATED transaction_route.py - Key Changes Only
-------------------------------------------------
-Full file is too long, showing critical updates
-"""
-
-"""
 Complete Updated Transaction Route
 -----------------------------------
 backend/app/api/v1/routes/transaction_route.py
 
-Updates:
-- Added user statistics calculation
-- Fixed feature engineering
-- Better severity handling
-- Improved error messages
-- Enhanced email notifications
+✅ Fixed location detection with thread pool
+✅ Single geolocation service (ipapi.co)
+✅ Proper error handling and fallbacks
+✅ Enhanced logging for production debugging
+✅ Fixed Mongo safety, ThreadPoolExecutor, and datetime serialization
 """
 
 from fastapi import APIRouter, Depends, Request, HTTPException
@@ -23,6 +16,9 @@ from typing import Optional
 from bson import ObjectId
 import numpy as np
 from pydantic import BaseModel
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
 from app.db.mongodb import get_database
 from app.schemas.transaction_schema import TransactionCreate
 from app.utils.geoip_utils import get_location_from_ip
@@ -35,11 +31,9 @@ from app.hybrid_model.hybrid_transaction import hybrid_transaction_decision
 from app.services.otp_service import create_or_resend_otp
 from app.services.otp_verify_service import verify_otp
 from app.services.email_service import send_email
-import asyncio
 
-# --------------------------------------------------
-# Pydantic models
-# --------------------------------------------------
+executor = ThreadPoolExecutor(max_workers=4)
+
 class VerifyOTPRequest(BaseModel):
     otp: str
     transaction_id: str
@@ -50,59 +44,44 @@ class RequestOTPRequest(BaseModel):
 router = APIRouter(prefix="/transactions", tags=["Transactions"])
 
 # --------------------------------------------------
-# HELPER: Get User Statistics
+# USER STATISTICS
 # --------------------------------------------------
 async def get_user_statistics(db, user_id: str) -> dict:
-    """
-    Calculate user's historical transaction statistics
-    Used for dynamic rule-based scoring
-    
-    Returns:
-        dict: {avg_amount, max_amount, min_amount, transaction_count}
-    """
     try:
         pipeline = [
-            {
-                "$match": {
-                    "user_id": user_id,
-                    "status": {"$in": ["completed", "resolved"]}
-                }
-            },
-            {
-                "$group": {
-                    "_id": None,
-                    "avg_amount": {"$avg": "$amount"},
-                    "max_amount": {"$max": "$amount"},
-                    "min_amount": {"$min": "$amount"},
-                    "transaction_count": {"$sum": 1},
-                    "total_volume": {"$sum": "$amount"}
-                }
-            }
+            {"$match": {"user_id": user_id, "status": {"$in": ["completed", "resolved"]}}},
+            {"$group": {
+                "_id": None,
+                "avg_amount": {"$avg": "$amount"},
+                "max_amount": {"$max": "$amount"},
+                "min_amount": {"$min": "$amount"},
+                "transaction_count": {"$sum": 1},
+                "total_volume": {"$sum": "$amount"}
+            }}
         ]
-        
+
         result = await db.transactions.aggregate(pipeline).to_list(1)
-        
+
         if result and result[0]["transaction_count"] > 0:
-            stats = result[0]
+            r = result[0]
             return {
-                "avg_amount": float(stats.get("avg_amount", 100.0)),
-                "max_amount": float(stats.get("max_amount", 1000.0)),
-                "min_amount": float(stats.get("min_amount", 10.0)),
-                "transaction_count": int(stats.get("transaction_count", 0)),
-                "total_volume": float(stats.get("total_volume", 0.0))
+                "avg_amount": float(r.get("avg_amount", 100.0)),
+                "max_amount": float(r.get("max_amount", 1000.0)),
+                "min_amount": float(r.get("min_amount", 10.0)),
+                "transaction_count": int(r.get("transaction_count", 0)),
+                "total_volume": float(r.get("total_volume", 0.0))
             }
-        else:
-            # No history - return defaults
-            return {
-                "avg_amount": 100.0,
-                "max_amount": 1000.0,
-                "min_amount": 10.0,
-                "transaction_count": 0,
-                "total_volume": 0.0
-            }
-    
+
+        return {
+            "avg_amount": 100.0,
+            "max_amount": 1000.0,
+            "min_amount": 10.0,
+            "transaction_count": 0,
+            "total_volume": 0.0
+        }
+
     except Exception as e:
-        print(f"⚠️  Error calculating user stats: {e}")
+        print(f"⚠️ Error calculating user stats: {e}")
         return {
             "avg_amount": 100.0,
             "max_amount": 1000.0,
@@ -114,79 +93,43 @@ async def get_user_statistics(db, user_id: str) -> dict:
 # --------------------------------------------------
 # FEATURE ENGINEERING
 # --------------------------------------------------
-async def calculate_transaction_features(
-    db, user_id: str, current_txn: dict, last_txn: dict = None
-):
-    """
-    Calculate all features needed for ML models
-    
-    Args:
-        db: Database connection
-        user_id: User ID
-        current_txn: Current transaction data
-        last_txn: Previous transaction (if exists)
-    
-    Returns:
-        dict: Enhanced transaction with all calculated features
-    """
+async def calculate_transaction_features(db, user_id: str, current_txn: dict, last_txn: dict = None):
     now = current_txn["transaction_date"]
     amount = current_txn["amount"]
-    
-    # Time-based features
+
     hour = now.hour
     day_of_week = now.weekday()
     day = now.day
-    
-    # Calculate recent transaction counts
+
     one_hour_ago = now - timedelta(hours=1)
     twenty_four_hours_ago = now - timedelta(hours=24)
-    
-    try:
-        tx_last_1hr = await db.transactions.count_documents({
-            "user_id": user_id,
-            "transaction_date": {"$gte": one_hour_ago, "$lt": now},
-            "status": {"$in": ["completed", "resolved"]}
-        })
-        
-        tx_last_24hr = await db.transactions.count_documents({
-            "user_id": user_id,
-            "transaction_date": {"$gte": twenty_four_hours_ago, "$lt": now},
-            "status": {"$in": ["completed", "resolved"]}
-        })
-    except Exception as e:
-        print(f"⚠️  Error counting recent transactions: {e}")
-        tx_last_1hr = 0
-        tx_last_24hr = 0
-    
-    # Get user's transaction history for amount statistics
-    try:
-        user_txns = await db.transactions.find(
-            {
-                "user_id": user_id,
-                "status": {"$in": ["completed", "resolved"]}
-            },
-            {"amount": 1, "category": 1}
-        ).to_list(length=1000)
-    except Exception as e:
-        print(f"⚠️  Error fetching user transactions: {e}")
-        user_txns = []
-    
-    # Calculate amount-based features
-    if user_txns and len(user_txns) > 0:
-        amounts = [float(t.get("amount", 0)) for t in user_txns]
+
+    tx_last_1hr = await db.transactions.count_documents({
+        "user_id": user_id,
+        "transaction_date": {"$gte": one_hour_ago, "$lt": now},
+        "status": {"$in": ["completed", "resolved"]}
+    })
+
+    tx_last_24hr = await db.transactions.count_documents({
+        "user_id": user_id,
+        "transaction_date": {"$gte": twenty_four_hours_ago, "$lt": now},
+        "status": {"$in": ["completed", "resolved"]}
+    })
+
+    user_txns = await db.transactions.find(
+        {"user_id": user_id, "status": {"$in": ["completed", "resolved"]}},
+        {"amount": 1, "category": 1}
+    ).to_list(1000)
+
+    if user_txns:
+        amounts = [float(t["amount"]) for t in user_txns]
         mean_amount = np.mean(amounts)
         std_amount = np.std(amounts) if len(amounts) > 1 else max(mean_amount * 0.3, 1.0)
-        
-        # Z-score: how many standard deviations from mean
-        if std_amount > 0:
-            amount_zscore = (amount - mean_amount) / std_amount
-        else:
-            amount_zscore = 0.0
-        
-        # Category-specific statistics
+        amount_zscore = (amount - mean_amount) / std_amount if std_amount > 0 else 0.0
+
         category = current_txn.get("category", "")
-        cat_amounts = [float(t.get("amount", 0)) for t in user_txns if t.get("category") == category]
-        
+        cat_amounts = [float(t["amount"]) for t in user_txns if t.get("category") == category]
+
         if cat_amounts:
             cat_mean = np.mean(cat_amounts)
             cat_std = np.std(cat_amounts) if len(cat_amounts) > 1 else 1.0
@@ -197,64 +140,35 @@ async def calculate_transaction_features(
             category_amount_zscore = 0.0
             category_usage_ratio = 0.0
             new_category_flag = 1
-        
-        unique_categories = len(set(t.get("category") for t in user_txns if t.get("category")))
-        unique_category_count = unique_categories
+
+        unique_category_count = len(set(t.get("category") for t in user_txns if t.get("category")))
     else:
-        # First transaction or no history
         amount_zscore = 0.0
         category_amount_zscore = 0.0
         category_usage_ratio = 0.0
         new_category_flag = 1
         unique_category_count = 1
-    
-    # Get user profile
-    try:
-        user_profile = await db.users.find_one({"_id": ObjectId(user_id)})
-        if user_profile:
-            account_balance = float(user_profile.get("account_balance", 10000.0))
-            customer_age = int(user_profile.get("age", 30))
-        else:
-            account_balance = 10000.0
-            customer_age = 30
-    except Exception as e:
-        print(f"⚠️  Error fetching user profile: {e}")
-        account_balance = 10000.0
-        customer_age = 30
-    
-    # Calculate amount to balance ratio (with safety check)
+
+    user_profile = await db.users.find_one({"_id": ObjectId(user_id)})
+    account_balance = float(user_profile.get("account_balance", 10000.0)) if user_profile else 10000.0
+    customer_age = int(user_profile.get("age", 30)) if user_profile else 30
+
     amount_to_balance = amount / account_balance if account_balance > 0 else 0.0
-    
-    # High-risk category detection
+
     HIGH_RISK_CATEGORIES = ["Gambling", "Cryptocurrency", "International", "Cash Withdrawal"]
-    high_risk_category = 1 if current_txn.get("category", "") in HIGH_RISK_CATEGORIES else 0
-    
-    # Device/IP/Location change detection
-    device_changed = 0
-    ip_changed = 0
-    location_changed = 0
-    
+    high_risk_category = 1 if current_txn.get("category") in HIGH_RISK_CATEGORIES else 0
+
+    device_changed = ip_changed = location_changed = 0
     if last_txn:
-        # Device change
-        curr_device = current_txn.get("device_id")
-        last_device = last_txn.get("device_id")
-        device_changed = 1 if curr_device and last_device and curr_device != last_device else 0
-        
-        # IP change
-        curr_ip = current_txn.get("ip")
-        last_ip = last_txn.get("ip")
-        ip_changed = 1 if curr_ip and last_ip and curr_ip != last_ip else 0
-        
-        # Location change
-        curr_city = current_txn.get("location", {}).get("city")
-        last_city = last_txn.get("location", {}).get("city")
-        location_changed = 1 if curr_city and last_city and curr_city != last_city else 0
-    
-    # Login attempts (default to 0 for now)
-    login_attempts = 0
-    
-    # Build enhanced transaction with all features
-    enhanced_txn = {
+        device_changed = int(current_txn.get("device_id") != last_txn.get("device_id"))
+        ip_changed = int(current_txn.get("ip") != last_txn.get("ip"))
+        last_loc = last_txn.get("location") or {}
+        location_changed = int(
+            current_txn.get("location", {}).get("city") != last_loc.get("city") or
+            current_txn.get("location", {}).get("country") != last_loc.get("country")
+        )
+
+    return {
         **current_txn,
         "hour": hour,
         "day_of_week": day_of_week,
@@ -271,12 +185,10 @@ async def calculate_transaction_features(
         "device_changed": device_changed,
         "ip_changed": ip_changed,
         "location_changed": location_changed,
-        "login_attempts": login_attempts,
+        "login_attempts": 0,
         "account_balance": account_balance,
         "customer_age": customer_age,
     }
-    
-    return enhanced_txn
 
 # --------------------------------------------------
 # CREATE TRANSACTION
@@ -288,70 +200,36 @@ async def create_transaction(
     db=Depends(get_database),
     current_user=Depends(get_current_user),
 ):
-    """
-    Create a new transaction with hybrid anomaly detection
-    
-    Flow:
-    1. Check if account is locked
-    2. Get request metadata (IP, device, location)
-    3. Calculate transaction features
-    4. Run hybrid detection (rule + ML)
-    5. Make decision based on severity:
-       - normal/low: approve immediately
-       - moderate: flag for OTP verification
-       - high/critical: block and lock account
-    """
     user_id = current_user["id"]
     email = current_user["email"]
-    
-    # --------------------------------------------------
-    # 1. Check Account Lock Status
-    # --------------------------------------------------
+
     user = await db.users.find_one({"_id": ObjectId(user_id)})
-    if user is None:
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    locked_until = user.get("locked_until")
-    if locked_until and locked_until > datetime.utcnow():
-        time_remaining = (locked_until - datetime.utcnow()).total_seconds() / 60
-        raise HTTPException(
-            status_code=403,
-            detail=f"Account locked for {int(time_remaining)} more minutes due to security reasons. Please try again at {locked_until.strftime('%H:%M:%S')}."
-        )
-    
-    # --------------------------------------------------
-    # 2. Get Request Metadata
-    # --------------------------------------------------
+
+    if user.get("locked_until") and user["locked_until"] > datetime.utcnow():
+        raise HTTPException(status_code=403, detail="Account temporarily locked")
+
     ip_address = get_client_ip(request)
     device_id = get_device_id(request)
-    location = get_location_from_ip(ip_address)
-    
-    # --------------------------------------------------
-    # 3. Get Last Transaction
-    # --------------------------------------------------
+
     try:
-        last_txn = await db.transactions.find_one(
-            {"user_id": user_id},
-            sort=[("transaction_date", -1)]
-        )
-    except Exception as e:
-        print(f"⚠️  Error fetching last transaction: {e}")
-        last_txn = None
-    
-    # Calculate time since last transaction
-    prev_date = last_txn.get("transaction_date") if last_txn else None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+        location = await loop.run_in_executor(executor, get_location_from_ip, ip_address)
+        if not location or not location.get("city") or not location.get("country"):
+            raise ValueError("Invalid location")
+    except Exception:
+        location = {"country": "Unknown", "city": "Unknown", "latitude": None, "longitude": None}
+
+    last_txn = await db.transactions.find_one({"user_id": user_id}, sort=[("transaction_date", -1)])
     now = datetime.utcnow()
-    transaction_duration = None
-    
-    if prev_date and isinstance(prev_date, datetime):
-        transaction_duration = (now - prev_date).total_seconds()
-    
-    # Generate merchant ID
-    merchant_id = f"MCT-{data.category[:3].upper()}-{user_id[:4]}"
-    
-    # --------------------------------------------------
-    # 4. Build Current Transaction
-    # --------------------------------------------------
+
+    merchant_cat = (data.category or "GEN")[:3].upper()
+    merchant_id = f"MCT-{merchant_cat}-{user_id[:4]}-{int(now.timestamp())}"
+
     current_txn = {
         "user_id": user_id,
         "amount": data.amount,
@@ -361,41 +239,28 @@ async def create_transaction(
         "device_id": device_id,
         "location": location,
         "transaction_date": now,
-        "transaction_duration": transaction_duration,
-        "previous_transaction_date": prev_date,
+        "previous_transaction_date": last_txn.get("transaction_date") if last_txn else None,
     }
-    
-    # --------------------------------------------------
-    # 5. Calculate Features
-    # --------------------------------------------------
+
+    # Calculate Features
     try:
-        enhanced_txn = await calculate_transaction_features(
-            db, user_id, current_txn, last_txn
-        )
+        enhanced_txn = await calculate_transaction_features(db, user_id, current_txn, last_txn)
     except Exception as e:
         print(f"❌ Error calculating features: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Error processing transaction. Please try again."
-        )
-    
-    # --------------------------------------------------
-    # 6. Get User Statistics
-    # --------------------------------------------------
+        raise HTTPException(status_code=500, detail="Error processing transaction. Please try again.")
+
+    # Get User Statistics
     try:
         user_stats = await get_user_statistics(db, user_id)
     except Exception as e:
         print(f"⚠️  Error getting user stats: {e}")
         user_stats = None
-    
-    # --------------------------------------------------
-    # 7. Run Hybrid Detection
-    # --------------------------------------------------
+
+    # Run Hybrid Detection
     try:
         hybrid = hybrid_transaction_decision(enhanced_txn, last_txn, user_stats)
     except Exception as e:
         print(f"❌ Error in hybrid detection: {e}")
-        # Fallback to safe decision
         hybrid = {
             "rule_flag": 1,
             "rule_score": 0.5,
@@ -411,10 +276,7 @@ async def create_transaction(
             "reasons": [{"message": "Error in detection system, flagging for manual review"}],
             "reason_summary": "System error - manual review required"
         }
-    
-    # --------------------------------------------------
-    # 8. Build Transaction Document
-    # --------------------------------------------------
+
     txn_dict = {
         **enhanced_txn,
         "merchant_id": merchant_id,
@@ -433,64 +295,37 @@ async def create_transaction(
         "reason_summary": hybrid.get("reason_summary", "No issues detected"),
         "risk_score": int(round(float(hybrid.get("hybrid_score", 0.0)) * 100)),
     }
-    
-    # --------------------------------------------------
-    # 9. Make Decision Based on Severity
-    # --------------------------------------------------
+
+    # Make Decision Based on Severity
     severity = hybrid.get("severity", "normal")
-    
-    # ✅ CASE 1: Normal or Low Risk - Approve Immediately
+
+    # CASE 1: Normal or Low Risk
     if severity in ["normal", "low"]:
         txn_dict["status"] = "completed"
-        
         try:
             result = await db.transactions.insert_one(txn_dict)
             txn_dict["_id"] = str(result.inserted_id)
-            
-            # Push to Redis for recent transactions
-            try:
-                push_recent_txn(user_id, txn_dict)
-            except Exception as e:
-                print(f"⚠️  Redis push failed: {e}")
-            
-            # Serialize datetime for response
+            try: push_recent_txn(user_id, txn_dict)
+            except Exception as e: print(f"⚠️ Redis push failed: {e}")
             txn_dict["transaction_date"] = txn_dict["transaction_date"].isoformat()
             if txn_dict.get("previous_transaction_date"):
                 txn_dict["previous_transaction_date"] = txn_dict["previous_transaction_date"].isoformat()
-            
-            return {
-                "message": "Transaction completed successfully",
-                "data": txn_dict,
-                "severity": severity,
-                "risk_score": txn_dict["risk_score"]
-            }
-        
+            return {"message": "Transaction completed successfully", "data": txn_dict, "severity": severity, "risk_score": txn_dict["risk_score"]}
         except Exception as e:
             print(f"❌ Error saving transaction: {e}")
-            raise HTTPException(
-                status_code=500,
-                detail="Error processing transaction. Please try again."
-            )
-    
-    # ⚠️ CASE 2: Moderate Risk - Flag for OTP Verification
+            raise HTTPException(status_code=500, detail="Error processing transaction. Please try again.")
+
+    # CASE 2: Moderate Risk
     elif severity == "moderate":
         txn_dict["status"] = "flagged"
-        
         try:
             result = await db.flagged_transactions.insert_one(txn_dict)
             txn_dict["_id"] = str(result.inserted_id)
-            
-            # Push to Redis
-            try:
-                push_recent_txn(user_id, txn_dict)
-            except Exception as e:
-                print(f"⚠️  Redis push failed: {e}")
-            
-            # Serialize datetime
+            try: push_recent_txn(user_id, txn_dict)
+            except Exception as e: print(f"⚠️ Redis push failed: {e}")
             txn_dict["transaction_date"] = txn_dict["transaction_date"].isoformat()
             if txn_dict.get("previous_transaction_date"):
                 txn_dict["previous_transaction_date"] = txn_dict["previous_transaction_date"].isoformat()
-            
             return {
                 "message": "Transaction flagged for verification. Please click 'Request OTP' to receive a verification code on your email.",
                 "data": txn_dict,
@@ -498,53 +333,26 @@ async def create_transaction(
                 "risk_score": txn_dict["risk_score"],
                 "action_required": "otp_verification"
             }
-        
         except Exception as e:
             print(f"❌ Error saving flagged transaction: {e}")
-            raise HTTPException(
-                status_code=500,
-                detail="Error processing transaction. Please try again."
-            )
-    
-    # 🚨 CASE 3: High or Critical Risk - Block Transaction
-    else:  # severity in ["high", "critical"]
+            raise HTTPException(status_code=500, detail="Error processing transaction. Please try again.")
+
+    # CASE 3: High / Critical Risk
+    else:
         txn_dict["status"] = "blocked"
-        
         try:
-            # Save to anomaly logs
-            txn_id = await handle_anomaly(
-                {
-                    "is_anomaly": True,
-                    "event_type": "transaction",
-                    "event_data": txn_dict,
-                },
-                db,
-            )
-            txn_dict["_id"] = txn_id
-            
-            # Push to Redis
-            try:
-                push_recent_txn(user_id, txn_dict)
-            except Exception as e:
-                print(f"⚠️  Redis push failed: {e}")
-            
-            # Get reason from anomaly log
+            txn_id = await handle_anomaly({"is_anomaly": True, "event_type": "transaction", "event_data": txn_dict}, db)
+            txn_dict["_id"] = str(txn_id)
+            try: push_recent_txn(user_id, txn_dict)
+            except Exception as e: print(f"⚠️ Redis push failed: {e}")
             try:
                 anomaly_log = await db.anomaly_logs.find_one({"_id": ObjectId(txn_id)})
                 reason_summary = anomaly_log.get("reason_summary") if anomaly_log else "suspicious activity detected"
             except Exception:
                 reason_summary = "suspicious activity detected"
-            
-            # Lock account for 3 hours
             lock_duration_hours = 3
             lock_until = datetime.utcnow() + timedelta(hours=lock_duration_hours)
-            
-            await db.users.update_one(
-                {"_id": ObjectId(user_id)},
-                {"$set": {"locked_until": lock_until}}
-            )
-            
-            # Send email notification
+            await db.users.update_one({"_id": ObjectId(user_id)}, {"$set": {"locked_until": lock_until}})
             email_subject = "🔒 Security Alert - Account Temporarily Locked"
             email_body = f"""
 Dear {user.get('first_name', 'User')},
@@ -573,16 +381,11 @@ For your safety, do not share your account credentials with anyone.
 
 Best regards,
 Your Security Team
-            """
-            
-            # Send email asynchronously
+"""
             asyncio.create_task(send_email(email, email_subject, email_body))
-            
-            # Serialize datetime
             txn_dict["transaction_date"] = txn_dict["transaction_date"].isoformat()
             if txn_dict.get("previous_transaction_date"):
                 txn_dict["previous_transaction_date"] = txn_dict["previous_transaction_date"].isoformat()
-            
             return {
                 "message": f"Transaction blocked due to {severity} security risk. Your account has been locked for {lock_duration_hours} hours.",
                 "data": txn_dict,
@@ -591,13 +394,9 @@ Your Security Team
                 "locked_until": lock_until.isoformat(),
                 "reason": reason_summary
             }
-        
         except Exception as e:
             print(f"❌ Error handling blocked transaction: {e}")
-            raise HTTPException(
-                status_code=500,
-                detail="Transaction blocked. Please contact support."
-            )
+            raise HTTPException(status_code=500, detail="Transaction blocked. Please contact support.")
 
 # --------------------------------------------------
 # REQUEST OTP (Manual Send + Resend)

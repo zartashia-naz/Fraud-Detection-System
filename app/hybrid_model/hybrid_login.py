@@ -253,6 +253,7 @@
 
 
 
+
 """
 Hybrid Login Anomaly Detection
 --------------------------------
@@ -354,11 +355,26 @@ def hybrid_login_decision(login_event_df: pd.DataFrame) -> dict:
         login_event_df.loc[0, 'high_login_attempts'] = 0
         row = login_event_df.iloc[0]  # Update row reference
 
+    # ✅ NEW: Detect impossible travel (location change + rapid login)
+    impossible_travel = False
+    if row.get('location_changed', 0) == 1 and row.get('time_since_last_login') is not None:
+        time_gap = row.get('time_since_last_login', 0)
+        # If location changed but login happened within 5 minutes, it's impossible travel
+        if time_gap < 300:  # 5 minutes
+            impossible_travel = True
+            print(f"[IMPOSSIBLE TRAVEL] Location changed within {int(time_gap)}s - physically impossible!")
+
     # -------------------------------
     # 1. RULE-BASED DETECTION
     # -------------------------------
     rule_flag = login_rule_engine(login_event_df)
     rule_score = 1.0 if rule_flag == 1 else 0.0
+    
+    # ✅ NEW: Boost rule score for impossible travel
+    if impossible_travel:
+        # Force rule score to at least 0.8 (high risk)
+        rule_score = max(rule_score, 0.8)
+        print(f"[RULE OVERRIDE] Impossible travel detected - boosting rule_score to {rule_score}")
 
     # -------------------------------
     # 2. ML-BASED DETECTION
@@ -418,6 +434,12 @@ def hybrid_login_decision(login_event_df: pd.DataFrame) -> dict:
     # -------------------------------
     hybrid_score = (RULE_WEIGHT * rule_score) + (ML_WEIGHT * ml_score)
 
+    # ✅ NEW: Force high risk for impossible travel
+    if impossible_travel:
+        # Override to at least high-moderate range
+        hybrid_score = max(hybrid_score, 0.65)
+        print(f"[HYBRID OVERRIDE] Impossible travel - forcing hybrid_score to {hybrid_score}")
+
     if hybrid_score >= ANOMALY_THRESHOLD:
         is_anomaly = 1
         is_moderate = 0
@@ -468,8 +490,20 @@ def _build_anomaly_reason(row: pd.Series) -> str:
     """
     reasons = []
     
+    # ✅ NEW: Priority 0 - Impossible travel (HIGHEST PRIORITY)
+    time_since = row.get('time_since_last_login', None)
+    location_changed = row.get('location_changed', 0)
+    if location_changed == 1 and time_since is not None and time_since < 300:
+        location = row.get('location', {})
+        city = location.get('city', 'Unknown')
+        country = location.get('country', 'Unknown')
+        minutes = int(time_since / 60)
+        seconds = int(time_since % 60)
+        time_str = f"{minutes}m {seconds}s" if minutes > 0 else f"{seconds}s"
+        reasons.append(f"Impossible travel: Login from {city}, {country} just {time_str} after previous login")
+    
     # Priority 1: Location change (highest priority - most critical for security)
-    if row.get('location_changed', 0) == 1:
+    elif row.get('location_changed', 0) == 1:
         location = row.get('location', {})
         city = location.get('city', 'Unknown')
         country = location.get('country', 'Unknown')
@@ -501,9 +535,8 @@ def _build_anomaly_reason(row: pd.Series) -> str:
         # Format hour range for better readability
         reasons.append(f"Login at unusual hour ({hour}:00-{(hour+1):02d}:00)")
     
-    # Priority 7: Rapid login (may indicate automated attack)
-    time_since = row.get('time_since_last_login', None)
-    if time_since is not None and time_since < 60:
+    # Priority 7: Rapid login (may indicate automated attack) - only if not impossible travel
+    if time_since is not None and time_since < 60 and not (location_changed == 1 and time_since < 300):
         reasons.append(f"Rapid login attempt ({int(time_since)}s after previous login)")
     
     # Combine reasons intelligently
@@ -515,3 +548,4 @@ def _build_anomaly_reason(row: pd.Series) -> str:
     else:
         # Combine top 2 most important reasons for context
         return f"{reasons[0]}; {reasons[1]}"
+ 

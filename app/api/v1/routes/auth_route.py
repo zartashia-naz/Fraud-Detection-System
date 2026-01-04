@@ -323,21 +323,35 @@ Your Security Team
     new_device = not context["is_trusted_device"]
     otp_required = False
 
+    # Debug logging
+    print(f"[OTP DECISION] User: {user['email']}")
+    print(f"[OTP DECISION] is_trusted_device: {context['is_trusted_device']}")
+    print(f"[OTP DECISION] is_moderate: {context['is_moderate']}")
+    print(f"[OTP DECISION] risk_score: {context['risk_score']}")
+    print(f"[OTP DECISION] 2fa_enabled: {user_2fa_enabled}")
+
     # ✅ FIXED: Context-aware trust - trusted devices still require OTP for risky contexts
+    # Check risk score directly since is_moderate might not be reliable
     if context["is_trusted_device"]:
-        # Trusted device, but check if context changed
-        if context["is_moderate"] == 1:
-            # Context changed (location/IP/etc) - require OTP even on trusted device
+        # Trusted device - check risk level
+        if context["is_moderate"] == 1 or context["risk_score"] >= 45:
+            # Moderate/high risk detected - require OTP even on trusted device
             otp_required = True
+            print(f"[OTP DECISION] Trusted device but moderate/high risk → OTP REQUIRED")
         else:
-            # Trusted device with normal context - no OTP needed
+            # Trusted device with low risk - no OTP needed
             otp_required = False
-    elif context["is_moderate"] == 1:
-        # Untrusted device with moderate risk - require OTP
+            print(f"[OTP DECISION] Trusted device with low risk → NO OTP")
+    elif context["is_moderate"] == 1 or context["risk_score"] >= 45:
+        # Untrusted device with moderate/high risk - require OTP
         otp_required = True
+        print(f"[OTP DECISION] Untrusted device with moderate/high risk → OTP REQUIRED")
     elif context["risk_score"] < 30 and user_2fa_enabled:
         # Low risk but user has 2FA enabled - require OTP
         otp_required = True
+        print(f"[OTP DECISION] Low risk but 2FA enabled → OTP REQUIRED")
+    else:
+        print(f"[OTP DECISION] No OTP required")
 
     requires_device_trust = new_device and not otp_required
 
@@ -448,6 +462,21 @@ async def verify_login_otp(
         "role": user_role,
     })
 
+    # ✅ NEW: Mark the most recent login log as OTP verified
+    # This prevents bypass attempts after OTP challenge
+    await db.login_logs.update_one(
+        {
+            "user_id": current_user["id"],
+            "status": "success",
+        },
+        {
+            "$set": {"otp_verified": True}
+        },
+        sort=[("login_time", -1)]  # Update most recent
+    )
+    
+    print(f"[OTP VERIFIED] Marked login as OTP verified for user {current_user['email']}")
+
     # Update last_login and last_active for successful OTP verification
     now = datetime.utcnow()
     update_result = await db.users.update_one(
@@ -497,15 +526,77 @@ async def _create_login_log(
             sort=[("login_time", -1)],
         )
 
+    # ✅ FIXED: Track ALL recent suspicious activity, not just failed attempts
     login_attempts = 1
+    recent_failed_count = 0
+    last_failed_attempt_time = None
+    last_otp_challenge_time = None
+    has_unverified_otp = False
+    
     if user_id:
         recent_window = datetime.utcnow() - timedelta(minutes=15)
-        failed_count = await db.login_logs.count_documents({
+        
+        # Count recent failed attempts
+        recent_failed_count = await db.login_logs.count_documents({
             "user_id": user_id,
             "status": "failed",
             "login_time": {"$gte": recent_window},
         })
-        login_attempts = failed_count + 1
+        
+        # Get the most recent failed attempt time
+        if recent_failed_count > 0:
+            last_failed_log = await db.login_logs.find_one(
+                {"user_id": user_id, "status": "failed"},
+                sort=[("login_time", -1)]
+            )
+            if last_failed_log:
+                last_failed_attempt_time = last_failed_log["login_time"]
+        
+        # ✅ NEW: Check for recent OTP challenges that weren't verified
+        # Look for recent successful logins that triggered OTP (is_moderate=1 or suspicious_pattern=true)
+        recent_otp_challenge_window = datetime.utcnow() - timedelta(minutes=5)
+        last_otp_challenge = await db.login_logs.find_one(
+            {
+                "user_id": user_id,
+                "status": "success",
+                "login_time": {"$gte": recent_otp_challenge_window},
+                "$or": [
+                    {"is_moderate": 1},
+                    {"suspicious_pattern_detected": True},
+                    {"risk_score": {"$gte": 45}}
+                ]
+            },
+            sort=[("login_time", -1)]
+        )
+        
+        if last_otp_challenge:
+            last_otp_challenge_time = last_otp_challenge["login_time"]
+            
+            # Check if OTP was actually verified after that challenge
+            # Look for a successful login AFTER the challenge but with OTP verification
+            # If no such login exists, OTP was never verified
+            last_verified_login = await db.login_logs.find_one(
+                {
+                    "user_id": user_id,
+                    "status": "success",
+                    "login_time": {"$gt": last_otp_challenge["login_time"]},
+                    "otp_verified": True  # We'll need to add this field when OTP is verified
+                },
+                sort=[("login_time", -1)]
+            )
+            
+            # If there's an OTP challenge but no verified login after it, OTP was not completed
+            if not last_verified_login:
+                has_unverified_otp = True
+                print(f"[SECURITY] User {email} has unverified OTP challenge from {last_otp_challenge_time}")
+        
+        # For failed attempts: include all previous failures + current
+        # For successful attempts: include recent failures (suspicious pattern detection)
+        if status == "failed":
+            login_attempts = recent_failed_count + 1
+        else:
+            # Successful login but had recent failures
+            login_attempts = recent_failed_count + 1 if recent_failed_count > 0 else 1
 
     login_log = {
         "user_id": user_id,
@@ -518,8 +609,40 @@ async def _create_login_log(
         "login_time": datetime.utcnow(),
         "previous_login_time": previous_login_doc["login_time"] if previous_login_doc else None,
         "login_attempts": login_attempts,
+        "recent_failed_count": recent_failed_count,
+        "last_failed_attempt_time": last_failed_attempt_time,
         "status": status,
+        "otp_verified": False,  # ✅ NEW: Track if OTP was verified (will be updated after OTP verification)
     }
+    
+    # ✅ IMPROVED: Enhanced suspicious pattern detection
+    suspicious_pattern = False
+    suspicious_reasons = []
+    
+    if status == "success" and recent_failed_count > 0 and last_failed_attempt_time:
+        time_since_last_failure = (datetime.utcnow() - last_failed_attempt_time).total_seconds()
+        
+        # Pattern 1: Recent failed attempts followed by success
+        if time_since_last_failure < 300:  # Extended to 5 minutes
+            suspicious_pattern = True
+            suspicious_reasons.append(f"{recent_failed_count} failed attempt(s) within last 5 minutes")
+            print(f"[SUSPICIOUS PATTERN 1] User {email} had {recent_failed_count} failed attempts, "
+                  f"then succeeded {int(time_since_last_failure)}s later")
+    
+    # ✅ NEW: Pattern 2 - Unverified OTP challenge
+    if status == "success" and has_unverified_otp and last_otp_challenge_time:
+        time_since_otp_challenge = (datetime.utcnow() - last_otp_challenge_time).total_seconds()
+        
+        # If there's an unverified OTP challenge within last 10 minutes, still suspicious
+        if time_since_otp_challenge < 600:  # 10 minutes
+            suspicious_pattern = True
+            suspicious_reasons.append(f"Previous OTP challenge not completed ({int(time_since_otp_challenge)}s ago)")
+            print(f"[SUSPICIOUS PATTERN 2] User {email} had OTP challenge {int(time_since_otp_challenge)}s ago "
+                  f"that was never verified")
+    
+    # Combine suspicious reasons
+    if suspicious_reasons:
+        print(f"[SUSPICIOUS PATTERNS DETECTED] {'; '.join(suspicious_reasons)}")
 
     # ✅ FIXED: Always run risk assessment for all logins (trusted or not)
     try:
@@ -548,8 +671,34 @@ async def _create_login_log(
             "is_anomaly": bool(hybrid_result.get("is_anomaly", 0)),
             "risk_score": int(float(hybrid_result.get("hybrid_score", 0)) * 100),
             "anomaly_reason": hybrid_result.get("anomaly_reason"),
-            "is_trusted_device_login": is_trusted_device,  # Track if trusted device was used
+            "is_trusted_device_login": is_trusted_device,
+            "suspicious_pattern_detected": suspicious_pattern,  # ✅ NEW: Flag suspicious pattern
         })
+        
+        # ✅ NEW: Force moderate risk if suspicious pattern detected
+        if suspicious_pattern:
+            # Override risk to at least moderate
+            if login_log["is_moderate"] == 0 and login_log["is_anomaly"] == False:
+                login_log["is_moderate"] = 1
+                login_log["hybrid_score"] = max(login_log["hybrid_score"], 0.50)
+                login_log["risk_score"] = int(float(login_log["hybrid_score"]) * 100)
+                
+                # Build comprehensive anomaly reason
+                if suspicious_reasons:
+                    reason_text = "; ".join(suspicious_reasons)
+                else:
+                    reason_text = "Suspicious login pattern detected"
+                
+                login_log["anomaly_reason"] = (
+                    reason_text
+                    if not login_log["anomaly_reason"]
+                    else f"{login_log['anomaly_reason']}; {reason_text}"
+                )
+                print(f"[RISK OVERRIDE] Forcing moderate risk due to suspicious pattern. "
+                      f"New risk_score: {login_log['risk_score']}")
+        
+        # Store suspicious pattern details
+        login_log["suspicious_pattern_reasons"] = suspicious_reasons if suspicious_reasons else None
         
         # For trusted devices with successful login and normal context, we can still grant access
         # but we keep the risk score visible for monitoring/analytics
@@ -557,8 +706,8 @@ async def _create_login_log(
             location_changed = features_df['location_changed'].iloc[0] if 'location_changed' in features_df.columns else 0
             ip_changed = features_df['ip_changed'].iloc[0] if 'ip_changed' in features_df.columns else 0
             
-            if location_changed == 1 or ip_changed == 1:
-                # Context changed - mark for step-up auth
+            if location_changed == 1 or ip_changed == 1 or suspicious_pattern:
+                # Context changed or suspicious pattern - mark for step-up auth
                 login_log["trust_context_changed"] = True
             else:
                 # Normal context - but still show real risk score
