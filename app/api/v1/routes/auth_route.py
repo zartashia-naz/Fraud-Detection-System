@@ -462,20 +462,24 @@ async def verify_login_otp(
         "role": user_role,
     })
 
-    # ✅ NEW: Mark the most recent login log as OTP verified
-    # This prevents bypass attempts after OTP challenge
-    await db.login_logs.update_one(
+    # ✅ FIXED: Find the most recent login log first, then update it
+    # MongoDB update_one doesn't support sort parameter
+    most_recent_login = await db.login_logs.find_one(
         {
             "user_id": current_user["id"],
             "status": "success",
         },
-        {
-            "$set": {"otp_verified": True}
-        },
-        sort=[("login_time", -1)]  # Update most recent
+        sort=[("login_time", -1)]  # Sort works in find_one
     )
     
-    print(f"[OTP VERIFIED] Marked login as OTP verified for user {current_user['email']}")
+    if most_recent_login:
+        await db.login_logs.update_one(
+            {"_id": most_recent_login["_id"]},
+            {"$set": {"otp_verified": True}}
+        )
+        print(f"[OTP VERIFIED] Marked login {most_recent_login['_id']} as OTP verified for user {current_user['email']}")
+    else:
+        print(f"[OTP VERIFIED] No recent login log found for user {current_user['email']}")
 
     # Update last_login and last_active for successful OTP verification
     now = datetime.utcnow()
